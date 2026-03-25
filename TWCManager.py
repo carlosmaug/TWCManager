@@ -313,11 +313,20 @@ class TeslaTokenStore:
                 'access_token': env_access,
                 'refresh_token': env_refresh,
             }
+            env_audience = os.environ.get('TESLA_API_AUDIENCE', '').strip()
+            env_client_id = os.environ.get('TESLA_API_CLIENT_ID', '').strip()
+            env_fleet_base_url = os.environ.get('TESLA_FLEET_API_BASE_URL', '').strip()
             if(env_expires != ''):
                 try:
                     tokens['expires_at'] = float(env_expires)
                 except ValueError:
                     print(time_now() + ': ERROR: Invalid TESLA_API_EXPIRES_AT value.')
+            if(env_audience != ''):
+                tokens['audience'] = env_audience
+            if(env_client_id != ''):
+                tokens['client_id'] = env_client_id
+            if(env_fleet_base_url != ''):
+                tokens['fleet_api_base_url'] = env_fleet_base_url
             return tokens
 
         try:
@@ -338,6 +347,12 @@ class TeslaTokenStore:
             'refresh_token': tokens.get('refresh_token', ''),
             'expires_at': float(tokens.get('expires_at', 0)),
         }
+        if(tokens.get('audience', '') != ''):
+            payload['audience'] = tokens.get('audience', '')
+        if(tokens.get('client_id', '') != ''):
+            payload['client_id'] = tokens.get('client_id', '')
+        if(tokens.get('fleet_api_base_url', '') != ''):
+            payload['fleet_api_base_url'] = tokens.get('fleet_api_base_url', '')
 
         fh = open(self.file_name, 'w')
         try:
@@ -706,11 +721,10 @@ class BackgroundTaskRunner:
 
 
 class TeslaCarApi:
-    """Minimal Tesla Owner API client used for wake and charge commands."""
-    auth_url = 'https://auth.tesla.com/oauth2/v3/token'
-    owner_api_base_url = 'https://owner-api.teslamotors.com/api/1'
-    client_id = '81527cff06843c8634fdc09e8ac0abefb46ac849f38fe1e431c2ef2106796384'
-    client_secret = 'c7257eb71a564034f9419ee651c7d0e5f7aa6bfbd18bafb5c5c033b093bb2fa3'
+    """Tesla Fleet API client used for wake and charge commands."""
+    auth_url = 'https://fleet-auth.prd.vn.cloud.tesla.com/oauth2/v3/token'
+    default_audience = 'https://fleet-api.prd.na.vn.cloud.tesla.com'
+    default_fleet_api_base_url = 'https://fleet-api.prd.na.vn.cloud.tesla.com/api/1'
 
     def __init__(self, config=None, token_store=None):
         self.config = config if config != None else TeslaApiConfig(
@@ -728,6 +742,19 @@ class TeslaCarApi:
         self.transient_errors = ['upstream internal error', 'operation_timedout',
                                  'vehicle unavailable']
         self.error_retry_mins = 10
+        self.audience = os.environ.get('TESLA_API_AUDIENCE', self.default_audience).strip()
+        self.client_id = os.environ.get('TESLA_API_CLIENT_ID', '').strip()
+        fleet_api_base_url = os.environ.get(
+            'TESLA_FLEET_API_BASE_URL',
+            self.default_fleet_api_base_url
+        ).strip()
+        self.fleet_api_base_url = self.normalize_fleet_api_base_url(fleet_api_base_url)
+
+    def normalize_fleet_api_base_url(self, value):
+        value = str(value).strip().rstrip('/')
+        if(value.endswith('/api/1')):
+            return value
+        return value + '/api/1'
 
     def has_tokens(self):
         return (self.refresh_token != '' or self.bearer_token != '')
@@ -755,6 +782,20 @@ class TeslaCarApi:
             print(time_now() + ': ERROR: Token payload must include access_token or refresh_token.')
             return False
 
+        audience = str(tokens.get('audience', '')).strip()
+        client_id = str(tokens.get('client_id', '')).strip()
+        fleet_api_base_url = str(tokens.get('fleet_api_base_url', '')).strip()
+        if(audience != ''):
+            self.audience = audience
+        if(client_id != ''):
+            self.client_id = client_id
+        if(fleet_api_base_url != ''):
+            self.fleet_api_base_url = self.normalize_fleet_api_base_url(fleet_api_base_url)
+        elif(self.audience == 'https://fleet-api.prd.eu.vn.cloud.tesla.com'):
+            self.fleet_api_base_url = self.normalize_fleet_api_base_url(self.audience)
+        elif(self.audience == 'https://fleet-api.prd.na.vn.cloud.tesla.com'):
+            self.fleet_api_base_url = self.normalize_fleet_api_base_url(self.audience)
+
         self.bearer_token = access_token
         self.refresh_token = refresh_token
         if(expires_at > 0):
@@ -770,7 +811,8 @@ class TeslaCarApi:
 
         if(debugLevel >= 1):
             print(time_now() + ': Tesla API tokens imported. ' +
-                  ('Refresh token available.' if self.refresh_token != '' else 'Access token only.'))
+                  ('Refresh token available.' if self.refresh_token != '' else 'Access token only.') +
+                  ' Fleet API base=' + self.fleet_api_base_url)
         return True
 
     def persist_tokens(self):
@@ -779,6 +821,9 @@ class TeslaCarApi:
                 'access_token': self.bearer_token,
                 'refresh_token': self.refresh_token,
                 'expires_at': self.token_expire_time,
+                'audience': self.audience,
+                'client_id': self.client_id,
+                'fleet_api_base_url': self.fleet_api_base_url,
             })
 
     def auth_headers(self):
@@ -814,6 +859,12 @@ class TeslaCarApi:
 
         return response_json
 
+    def describe_response(self, payload):
+        try:
+            return json.dumps(payload, sort_keys=True)
+        except Exception:
+            return str(payload)
+
     def refresh_access_token(self):
         now = time.time()
 
@@ -826,16 +877,27 @@ class TeslaCarApi:
 
         payload = {
             'grant_type': 'refresh_token',
-            'client_id': self.client_id,
-            'client_secret': self.client_secret,
             'refresh_token': self.refresh_token,
+            'audience': self.audience,
         }
-        apiResponseDict = self.request_json(
-            'POST',
-            self.auth_url,
-            payload,
-            {'Content-Type': 'application/json'}
-        )
+        if(self.client_id != ''):
+            payload['client_id'] = self.client_id
+        try:
+            resp = requests.post(
+                self.auth_url,
+                data=payload,
+                headers={
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'Accept': 'application/json',
+                },
+                timeout=60,
+            )
+            apiResponseDict = resp.json()
+        except Exception as exc:
+            print(time_now() + ': ERROR: Failed to refresh Tesla Fleet API token: ' + str(exc))
+            self.last_error_time = now
+            self.token_expire_time = now + timedelta(days=10).total_seconds()
+            return False
 
         try:
             self.bearer_token = apiResponseDict['access_token']
@@ -881,17 +943,29 @@ class TeslaCarApi:
             if (len(self.vehicles) < 1):
                 apiResponseDict = self.request_json(
                     'GET',
-                    self.owner_api_base_url + '/vehicles',
+                    self.fleet_api_base_url + '/vehicles',
                     headers=self.auth_headers()
                 )
 
                 try:
-                    for i in range(0, apiResponseDict['count']):
-                        self.vehicles.append(CarApiVehicle(apiResponseDict['response'][i]['id'], self))
+                    vehicle_list = apiResponseDict.get('response', [])
+                    if(type(vehicle_list) == dict and 'vehicles' in vehicle_list):
+                        vehicle_list = vehicle_list.get('vehicles', [])
+                    if(type(vehicle_list) != list):
+                        raise TypeError
 
-                except (KeyError, TypeError):
-                    print(time_now() + ": ERROR: Can't get list of vehicles via Tesla car API.  Will try again in "
-                          + str(self.error_retry_mins) + " minutes.")
+                    self.vehicles = []
+                    for vehicle_payload in vehicle_list:
+                        vin = str(vehicle_payload.get('vin', '')).strip()
+                        if(vin == ''):
+                            continue
+                        self.vehicles.append(CarApiVehicle(vin, self))
+
+                except (AttributeError, KeyError, TypeError):
+                    print(time_now() + ": ERROR: Can't get list of vehicles via Tesla Fleet API from "
+                          + self.fleet_api_base_url + '/vehicles'
+                          + ". Will try again in " + str(self.error_retry_mins)
+                          + " minutes. Response: " + self.describe_response(apiResponseDict))
 
                     self.last_error_time = now
                     return False
@@ -924,7 +998,7 @@ class TeslaCarApi:
                     vehicle.lastWakeAttemptTime = now
                     apiResponseDict = self.request_json(
                         'POST',
-                        self.owner_api_base_url + '/vehicles/' + str(vehicle.ID) + '/wake_up',
+                        self.fleet_api_base_url + '/vehicles/' + str(vehicle.ID) + '/wake_up',
                         headers=self.auth_headers()
                     )
 
@@ -1089,7 +1163,7 @@ class TeslaCarApi:
                           + ' to vehicle ' + str(vehicle.ID) + '.')
                 apiResponseDict = self.request_json(
                     'POST',
-                    self.owner_api_base_url + '/vehicles/' + str(vehicle.ID) + '/command/charge_' + startOrStop,
+                    self.fleet_api_base_url + '/vehicles/' + str(vehicle.ID) + '/command/charge_' + startOrStop,
                     headers=self.auth_headers()
                 )
 
@@ -1702,7 +1776,7 @@ class CarApiVehicle:
         for retryCount in range(0, 3):
             apiResponseDict = self.api.request_json(
                 'GET',
-                self.api.owner_api_base_url + '/vehicles/' + str(self.ID) + '/vehicle_data',
+                self.api.fleet_api_base_url + '/vehicles/' + str(self.ID) + '/vehicle_data',
                 headers=self.api.auth_headers()
             )
 
@@ -1813,6 +1887,8 @@ class TWCSlave:
     lastVehicleConnected = None
     lastVehicleCharging = None
     autoStartChargeRequested = False
+    lastChargeStartRequestTime = 0
+    lastChargeStopRequestTime = 0
 
     def __init__(self, TWCID, maxAmps, car_api=None, task_runner=None, state=None,
                  local_twc_id=None, general_config=None, energy_config=None):
@@ -1845,6 +1921,8 @@ class TWCSlave:
         self.lastVehicleConnected = None
         self.lastVehicleCharging = None
         self.autoStartChargeRequested = False
+        self.lastChargeStartRequestTime = 0
+        self.lastChargeStopRequestTime = 0
 
     def describe_reported_state(self, state_code):
         state_map = {
@@ -1971,6 +2049,43 @@ class TWCSlave:
 
             if (len(self.masterHeartbeatData) != (7 if self.protocolVersion == 1 else 9)):
                 print(time_now() + ': Error in print_status displaying masterHeartbeatData', self.masterHeartbeatData)
+
+    def queue_charge_request(self, charge, reason):
+        debug_level = self.general_config.debug_level
+        now = time.time()
+        last_request_time = (
+            self.lastChargeStartRequestTime if charge else self.lastChargeStopRequestTime
+        )
+
+        # Match TeslaCarApi.charge()'s one-minute command rate limit so a TWC
+        # does not re-request the same start/stop command on every heartbeat
+        # while the car or API is still settling.
+        if(now - last_request_time < 60):
+            return False
+
+        queued = False
+        if(self.task_runner != None):
+            queued = self.task_runner.queue_task({'cmd':'charge', 'charge':charge})
+        else:
+            queued = queue_background_task({'cmd':'charge', 'charge':charge})
+
+        if(not queued):
+            return False
+
+        if(charge):
+            self.lastChargeStartRequestTime = now
+        else:
+            self.lastChargeStopRequestTime = now
+
+        if(debug_level >= 1):
+            print(time_now() + ': TWC %02X%02X queue Tesla API %s because %s' % (
+                self.TWCID[0],
+                self.TWCID[1],
+                ('start charge' if charge else 'stop charge'),
+                reason,
+            ))
+
+        return True
 
     def send_slave_heartbeat(self, masterID):
         # Send slave heartbeat
@@ -2238,40 +2353,25 @@ class TWCSlave:
                 # them both from charging.  If the away vehicle is not currently
                 # charging, I'm not sure if this would prevent it from charging
                 # when next plugged in.
-                if(self.task_runner != None):
-                    if (debug_level >= 1
-                        and self.task_runner.queue_task({'cmd':'charge', 'charge':False})
-                    ):
-                        print(time_now() + ': TWC %02X%02X queue Tesla API stop charge because car is drawing '
-                              '%.2fA while offered amps is 0.' %
-                              (self.TWCID[0], self.TWCID[1], self.reportedAmpsActual))
-                else:
-                    if (debug_level >= 1
-                        and queue_background_task({'cmd':'charge', 'charge':False})
-                    ):
-                        print(time_now() + ': TWC %02X%02X queue Tesla API stop charge because car is drawing '
-                              '%.2fA while offered amps is 0.' %
-                              (self.TWCID[0], self.TWCID[1], self.reportedAmpsActual))
+                self.queue_charge_request(
+                    False,
+                    'car is drawing %.2fA while offered amps is 0.' % (
+                        self.reportedAmpsActual,
+                    )
+                )
             elif(self.lastAmpsOffered >= 5.0 and self.reportedAmpsActual < 2.0
                  and self.reportedState != 0x02
             ):
                 # Car is not charging and is not reporting an error state, so
                 # try starting charge via car api.
                 self.autoStartChargeRequested = True
-                if(self.task_runner != None):
-                    if (debug_level >= 1
-                        and self.task_runner.queue_task({'cmd':'charge', 'charge':True})
-                    ):
-                        print(time_now() + ': TWC %02X%02X queue Tesla API start charge because vehicle is present '
-                              'but drawing only %.2fA with %.2fA offered.' %
-                              (self.TWCID[0], self.TWCID[1], self.reportedAmpsActual, self.lastAmpsOffered))
-                else:
-                    if (debug_level >= 1
-                        and queue_background_task({'cmd':'charge', 'charge':True})
-                    ):
-                        print(time_now() + ': TWC %02X%02X queue Tesla API start charge because vehicle is present '
-                              'but drawing only %.2fA with %.2fA offered.' %
-                              (self.TWCID[0], self.TWCID[1], self.reportedAmpsActual, self.lastAmpsOffered))
+                self.queue_charge_request(
+                    True,
+                    'vehicle is present but drawing only %.2fA with %.2fA offered.' % (
+                        self.reportedAmpsActual,
+                        self.lastAmpsOffered,
+                    )
+                )
             elif(self.reportedAmpsActual > 4.0):
                 # At least one plugged in car is successfully charging. We don't
                 # know which car it is, so we must set
@@ -2616,9 +2716,9 @@ class TWCSlave:
                               ' < 60 or self.reportedAmpsActual ' + str(self.reportedAmpsActual) +
                               ' < 4')
                     desiredAmpsOffered = minAmpsToOffer
-            elif (self.autoStartChargeRequested and debug_level >= 1):
-                print(time_now() + ': TWC %02X%02X stopping auto-started charge because '
-                      'available power dropped below minAmpsToOffer %.2fA.' %
+            elif (self.autoStartChargeRequested and debug_level >= 10):
+                print(time_now() + ': TWC %02X%02X auto-started charge no longer has enough '
+                      'available power (below minAmpsToOffer %.2fA).' %
                       (self.TWCID[0], self.TWCID[1], minAmpsToOffer))
         else:
             # We can tell the TWC how much power to use in 0.01A increments, but
@@ -2794,20 +2894,10 @@ class TWCSlave:
         # look like this:
         #   S 032e 0.25/0.00A: 03 0000 0019 0000 M: 05 0000 0000 0000
         if(self.autoStartChargeRequested and desiredAmpsOffered == 0):
-            if(self.task_runner != None):
-                if (debug_level >= 1
-                    and self.task_runner.queue_task({'cmd':'charge', 'charge':False})
-                ):
-                    print(time_now() + ': TWC %02X%02X queue Tesla API stop charge because '
-                          'auto-started charging no longer has enough available power.' %
-                          (self.TWCID[0], self.TWCID[1]))
-            else:
-                if (debug_level >= 1
-                    and queue_background_task({'cmd':'charge', 'charge':False})
-                ):
-                    print(time_now() + ': TWC %02X%02X queue Tesla API stop charge because '
-                          'auto-started charging no longer has enough available power.' %
-                          (self.TWCID[0], self.TWCID[1]))
+            self.queue_charge_request(
+                False,
+                'auto-started charging no longer has enough available power.'
+            )
 
         if(self.reportedAmpsMax != desiredAmpsOffered
            or desiredAmpsOffered == 0

@@ -152,6 +152,9 @@ function build_token_payload(array $config, string $code): array
         'access_token' => (string) ($payload['access_token'] ?? ''),
         'refresh_token' => (string) ($payload['refresh_token'] ?? ''),
         'expires_at' => time() + (float) ($payload['expires_in'] ?? 0),
+        'audience' => (string) ($config['audience'] ?? DEFAULT_AUDIENCE),
+        'client_id' => (string) ($config['client_id'] ?? ''),
+        'fleet_api_base_url' => rtrim((string) ($config['audience'] ?? DEFAULT_AUDIENCE), '/') . '/api/1',
     ];
 }
 
