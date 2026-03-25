@@ -1,511 +1,9 @@
-<?php
-///////////////////////////////////////////////////////////////////////////
-// Configuration parameters
-
-$debugLevel = 0;
-
-// Point this to the directory containing TWCManager.py.
-$twcScriptDir = "/srv/TWCManager/";
-
-// End configuration parameters
-///////////////////////////////////////////////////////////////////////////
-
-header('Expires: Mon, 26 Jul 1997 05:00:00 GMT');
-header('Last-Modified: ' . gmdate("D, d M Y H:i:s") . 'GMT');
-header('Cache-Control: no-cache, must-revalidate');
-header('Pragma: no-cache');
-
-function h($value)
-{
-    return htmlspecialchars((string)$value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
-}
-
-function request_str($key, $default = '')
-{
-    return isset($_REQUEST[$key]) ? (string)$_REQUEST[$key] : $default;
-}
-
-function request_array($key)
-{
-    $value = $_REQUEST[$key] ?? array();
-    return is_array($value) ? $value : array();
-}
-
-function page_url($params = array())
-{
-    return 'index.php' . ($params ? '?' . http_build_query($params) : '');
-}
-
-$ipcKey = ftok($twcScriptDir, "T");
-$ipcQueue = msg_get_queue($ipcKey, 0666);
-
-function ipc_send($ipcMsgTime, $ipcMsgID, $ipcMsg, $ipcMsgType = 2)
-{
-    global $ipcQueue, $debugLevel;
-
-    if($debugLevel >= 10) {
-        print "ipcQuery sending '" . h($ipcMsg) . "', id " . $ipcMsgID
-            . ", time " . $ipcMsgTime . "<p>";
-    }
-
-    $ipcErrorCode = 0;
-    if(msg_send($ipcQueue, $ipcMsgType, pack("LSa*", $ipcMsgTime, $ipcMsgID, $ipcMsg),
-                false, false, $ipcErrorCode) == false
-    ) {
-        return false;
-    }
-    return true;
-}
-
-function ipc_command($command)
-{
-    return ipc_send(time(), 0, $command, 2);
-}
-
-function ipc_query($command, $usePackets = false)
-{
-    global $ipcQueue, $debugLevel;
-
-    $ipcMsgID = rand(1, 65535);
-    $ipcMsgTime = time();
-    if(ipc_send($ipcMsgTime, $ipcMsgID, $command, 2) == false) {
-        return '';
-    }
-
-    $ipcMsgType = 0;
-    $ipcMsgRecv = '';
-    $ipcMaxMsgSize = 300;
-    $maxRetries = 50;
-    $numPackets = 0;
-    $msgResult = '';
-
-    for($i = 0; $i < $maxRetries; $i++) {
-        $ipcErrorCode = 0;
-        if(msg_receive($ipcQueue, 1, $ipcMsgType, $ipcMaxMsgSize, $ipcMsgRecv, false,
-                       MSG_IPC_NOWAIT | MSG_NOERROR, $ipcErrorCode) == false
-        ) {
-            if($ipcErrorCode != 42 && $debugLevel >= 1) {
-                print("Message receive failed with error code $ipcErrorCode<br>");
-            }
-        }
-        else {
-            $aryMsg = unpack("Ltime/SID/a*msg", $ipcMsgRecv);
-            if($debugLevel >= 10) {
-                print "ipcQuery received '" . h($aryMsg['msg']) . "', id " . $aryMsg['ID']
-                    . ", time " . $aryMsg['time'] . "<p>";
-            }
-
-            if($aryMsg['ID'] == $ipcMsgID) {
-                if($usePackets) {
-                    if($numPackets == 0) {
-                        $numPackets = ord($aryMsg['msg']);
-                    }
-                    else {
-                        $msgResult .= $aryMsg['msg'];
-                        $numPackets--;
-                        if($numPackets == 0) {
-                            return $msgResult;
-                        }
-                    }
-                    continue;
-                }
-
-                return $aryMsg['msg'];
-            }
-
-            if(time() - $aryMsg['time'] < 30) {
-                ipc_send($aryMsg['time'], $aryMsg['ID'], $aryMsg['msg'], 1);
-            }
-        }
-
-        usleep(100000);
-    }
-
-    return '';
-}
-
-function format_time_label($time)
-{
-    if(!preg_match('/^-?\d{1,2}:\d{2}$/', (string)$time)) {
-        return 'Not set';
-    }
-    return $time;
-}
-
-function format_day_bitmap($bitmap)
-{
-    $labels = array('Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su');
-    $active = array();
-    for($i = 0; $i < 7; $i++) {
-        if($bitmap & (1 << $i)) {
-            $active[] = $labels[$i];
-        }
-    }
-    return $active ? implode(', ', $active) : 'None';
-}
-
-function build_hour_options($use24HourTime)
-{
-    $hours = array();
-    for($hour = 0; $hour < 24; $hour++) {
-        $value = sprintf("%02d:00", $hour);
-        if($use24HourTime) {
-            $label = $value;
-        }
-        else {
-            if($hour == 0) {
-                $label = '12:00am';
-            }
-            elseif($hour < 12) {
-                $label = sprintf("%d:00am", $hour);
-            }
-            elseif($hour == 12) {
-                $label = '12:00pm';
-            }
-            else {
-                $label = sprintf("%d:00pm", $hour - 12);
-            }
-        }
-        $hours[$label] = $value;
-    }
-    return $hours;
-}
-
-function build_standard_amps($twcModelMaxAmps, $wiringMaxAmpsAllTWCs, $minAmpsPerTWC)
-{
-    if($twcModelMaxAmps < 40) {
-        $amps = array(
-            '6A' => '6',
-            '8A' => '8',
-            '10A' => '10',
-            '13A' => '13',
-            '17A' => '17',
-            '21A' => '21',
-            '25A' => '25',
-            '32A' => '32',
-        );
-    }
-    else {
-        $amps = array(
-            '6A' => '6',
-            '8A' => '8',
-            '12A' => '12',
-            '16A' => '16',
-            '20A' => '20',
-            '24A' => '24',
-            '28A' => '28',
-            '32A' => '32',
-            '36A' => '36',
-            '40A' => '40',
-            '48A' => '48',
-            '56A' => '56',
-            '64A' => '64',
-            '72A' => '72',
-            '80A' => '80',
-        );
-    }
-
-    foreach($amps as $label => $value) {
-        if((float)$value > (float)$wiringMaxAmpsAllTWCs || (float)$value < (float)$minAmpsPerTWC) {
-            unset($amps[$label]);
-        }
-    }
-
-    return $amps;
-}
-
-function render_select($name, $options, $currentValue, $extraAttrs = '')
-{
-    print '<select name="' . h($name) . '" id="' . h($name) . '"' . $extraAttrs . '>';
-    foreach($options as $label => $value) {
-        $selected = ((string)$currentValue === (string)$value) ? ' selected' : '';
-        print '<option value="' . h($value) . '"' . $selected . '>' . h($label) . '</option>';
-    }
-    print '</select>';
-}
-
-function render_checkbox($name, $checked)
-{
-    print '<input type="checkbox" name="' . h($name) . '" value="1"' . ($checked ? ' checked' : '') . '>';
-}
-
-function describe_twc_state($twc, $availableAmps, $minAmpsPerTWC)
-{
-    $actual = (float)$twc['actual_amps'];
-    $offered = (float)$twc['offered_amps'];
-
-    if($actual < 1.0) {
-        if($offered < 5.0) {
-            if($availableAmps > 0 && $availableAmps < $minAmpsPerTWC) {
-                return 'Power available is below the configured minimum charge current.';
-            }
-            return 'No charging power is currently available.';
-        }
-
-        return 'Not actively charging. Vehicle may be finished, unplugged, asleep, or waking.';
-    }
-
-    if($offered - $actual > 1.0) {
-        return 'Charging below the offered limit.';
-    }
-
-    return 'Charging normally.';
-}
-
-function parse_status_response($response)
-{
-    $defaults = array(
-        'raw' => $response,
-        'valid' => false,
-        'available_amps' => 0,
-        'wiring_max_amps' => 80,
-        'min_amps_per_twc' => 6,
-        'charge_now_amps' => 0,
-        'non_scheduled_amps' => '-1',
-        'scheduled_amps' => '-1',
-        'scheduled_start' => '00:00',
-        'scheduled_end' => '00:00',
-        'scheduled_days_bitmap' => 0,
-        'resume_track_green_energy_time' => '-1:00',
-        'need_tesla_tokens' => false,
-        'twcs' => array(),
-        'num_twcs' => 0,
-    );
-
-    if($response === '') {
-        return $defaults;
-    }
-
-    $parts = explode('`', $response);
-    if(count($parts) < 12) {
-        return $defaults;
-    }
-
-    $idx = 0;
-    $status = $defaults;
-    $status['available_amps'] = (float)$parts[$idx++];
-    $status['wiring_max_amps'] = (float)$parts[$idx++];
-    $status['min_amps_per_twc'] = (float)$parts[$idx++];
-    $status['charge_now_amps'] = (float)$parts[$idx++];
-    $status['non_scheduled_amps'] = (string)$parts[$idx++];
-    $status['scheduled_amps'] = (string)$parts[$idx++];
-    $status['scheduled_start'] = (string)$parts[$idx++];
-    $status['scheduled_end'] = (string)$parts[$idx++];
-    $status['scheduled_days_bitmap'] = (int)$parts[$idx++];
-    $status['resume_track_green_energy_time'] = (string)$parts[$idx++];
-    $status['need_tesla_tokens'] = ($parts[$idx++] === '1');
-    $status['num_twcs'] = isset($parts[$idx]) ? (int)$parts[$idx] : 0;
-    $idx++;
-
-    for($i = 0; $i < $status['num_twcs']; $i++) {
-        if(!isset($parts[$idx])) {
-            break;
-        }
-        $sub = explode('~', $parts[$idx++]);
-        $status['twcs'][] = array(
-            'id' => (string)($sub[0] ?? '????'),
-            'max_amps' => (float)($sub[1] ?? 0),
-            'actual_amps' => (float)($sub[2] ?? 0),
-            'offered_amps' => (float)($sub[3] ?? 0),
-            'state' => (string)($sub[4] ?? ''),
-        );
-    }
-
-    $status['valid'] = true;
-    return $status;
-}
-
-function decode_debug_response($response)
-{
-    if(strpos($response, 'FD 19') === 0) {
-        $serialHexAry = explode(' ', substr($response, 6, strlen($response) - 9));
-        $stsn = '';
-        foreach($serialHexAry as $value) {
-            $ascii = hexdec($value);
-            if($ascii > 0 && $ascii < 0xFF) {
-                $stsn .= chr($ascii);
-            }
-        }
-        return '(S)TSN: ' . $stsn;
-    }
-
-    if(strpos($response, 'FD 1A') === 0) {
-        $serialHexAry = explode(' ', substr($response, 6, strlen($response) - 9));
-        $model = '';
-        foreach($serialHexAry as $value) {
-            $ascii = hexdec($value);
-            if($ascii > 0 && $ascii < 0xFF) {
-                $model .= chr($ascii);
-            }
-        }
-        return 'Model: ' . $model;
-    }
-
-    if(strpos($response, 'FD 1B') === 0) {
-        return 'Firmware version: '
-            . hexdec(substr($response, 6, 2)) . '.'
-            . hexdec(substr($response, 9, 2)) . '.'
-            . hexdec(substr($response, 12, 2));
-    }
-
-    return '';
-}
-
-$pageMode = 'normal';
-$flashMessage = '';
-$flashError = '';
-$debugResponse = '';
-$debugDecoded = '';
-$dumpStateResponse = '';
-
-$request = $_REQUEST;
-$submit = request_str('submit');
-$debugTWC = request_str('debugTWC');
-$setDebugLevel = request_str('setDebugLevel');
-$beginTest = request_str('beginTest');
-$sendTWCMsg = request_str('sendTWCMsg');
-$setMasterHeartbeatData = request_str('setMasterHeartbeatData');
-$dumpState = request_str('dumpState');
-$nonScheduledAmpsMaxRequest = request_str('nonScheduledAmpsMax');
-$scheduledAmpsMaxRequest = request_str('scheduledAmpsMax');
-$scheduledAmpStartTimeRequest = request_str('scheduledAmpStartTime');
-$scheduledAmpsEndTimeRequest = request_str('scheduledAmpsEndTime');
-$resumeTrackGreenEnergyTimeRequest = request_str('resumeTrackGreenEnergyTime');
-$scheduledAmpsDayRequest = request_array('scheduledAmpsDay');
-
-if($debugTWC !== '') {
-    $pageMode = 'debug';
-    if($submit !== '') {
-        if((int)$setDebugLevel > 0) {
-            if(ipc_command('setDebugLevel=' . intval($setDebugLevel))) {
-                $flashMessage = 'Debug level updated.';
-            }
-            else {
-                $flashError = 'Unable to send debug level command.';
-            }
-        }
-        elseif(array_key_exists('beginTest', $request)) {
-            $cmd = ($beginTest === '') ? 'beginTest' : ('beginTest=' . $beginTest);
-            if(ipc_command($cmd)) {
-                $flashMessage = 'Debug test command sent.';
-            }
-            else {
-                $flashError = 'Unable to send debug test command.';
-            }
-        }
-    }
-}
-elseif(array_key_exists('sendTWCMsg', $request)) {
-    $pageMode = 'send';
-    if($submit !== '' && $sendTWCMsg !== '') {
-        if(ipc_command('sendTWCMsg=' . preg_replace('/[ \r\n\t]/', '', $sendTWCMsg))) {
-            sleep(3);
-            if(substr($sendTWCMsg, 0, 4) === 'FCA1') {
-                sleep(5);
-            }
-            $debugResponse = ipc_query('getLastTWCMsgResponse');
-            $debugDecoded = decode_debug_response($debugResponse);
-            $flashMessage = 'RS-485 debug message sent.';
-        }
-        else {
-            $flashError = 'Unable to send RS-485 debug message.';
-        }
-    }
-}
-elseif(array_key_exists('setMasterHeartbeatData', $request)) {
-    $pageMode = 'heartbeat';
-    if($submit !== '') {
-        if(ipc_command('setMasterHeartbeatData=' . preg_replace('/[ \r\n\t]/', '', $setMasterHeartbeatData))) {
-            $flashMessage = ($setMasterHeartbeatData === '')
-                ? 'Master heartbeat override cleared.'
-                : 'Master heartbeat override updated.';
-        }
-        else {
-            $flashError = 'Unable to send master heartbeat override.';
-        }
-    }
-}
-elseif($dumpState !== '') {
-    $pageMode = 'dump';
-    $dumpStateResponse = ipc_query('dumpState', true);
-    if($dumpStateResponse === '') {
-        $flashError = 'No response from TWCManager.';
-    }
-}
-else {
-    if($nonScheduledAmpsMaxRequest !== '') {
-        if(ipc_command('setNonScheduledAmps=' . $nonScheduledAmpsMaxRequest)) {
-            $flashMessage = 'Non-scheduled charging limit updated.';
-        }
-        else {
-            $flashError = 'Unable to update non-scheduled charging limit.';
-        }
-    }
-
-    if($scheduledAmpsMaxRequest !== '') {
-        $daysBitmap = 0;
-        for($i = 0; $i < 7; $i++) {
-            if(!empty($scheduledAmpsDayRequest[$i])) {
-                $daysBitmap |= (1 << $i);
-            }
-        }
-
-        $cmd = 'setScheduledAmps=' . $scheduledAmpsMaxRequest
-            . "\nstartTime=" . $scheduledAmpStartTimeRequest
-            . "\nendTime=" . $scheduledAmpsEndTimeRequest
-            . "\ndays=" . $daysBitmap;
-        if(ipc_command($cmd)) {
-            $flashMessage = 'Scheduled charging settings updated.';
-        }
-        else {
-            $flashError = 'Unable to update scheduled charging settings.';
-        }
-    }
-
-    if($resumeTrackGreenEnergyTimeRequest !== '') {
-        if(ipc_command('setResumeTrackGreenEnergyTime=' . $resumeTrackGreenEnergyTimeRequest)) {
-            $flashMessage = 'Green-energy resume time updated.';
-        }
-        else {
-            $flashError = 'Unable to update green-energy resume time.';
-        }
-    }
-
-    if(preg_match('/^1-day charge/', $submit)) {
-        if(ipc_command('chargeNow')) {
-            $flashMessage = '24-hour charge override enabled.';
-        }
-        else {
-            $flashError = 'Unable to enable 24-hour charge override.';
-        }
-    }
-    elseif($submit === 'Cancel 1-day charge') {
-        if(ipc_command('chargeNowCancel')) {
-            $flashMessage = '24-hour charge override cancelled.';
-        }
-        else {
-            $flashError = 'Unable to cancel 24-hour charge override.';
-        }
-    }
-}
-
-$status = parse_status_response(ipc_query('getStatus'));
-$twcModelMaxAmps = 80;
-foreach($status['twcs'] as $twc) {
-    $twcModelMaxAmps = (float)$twc['max_amps'];
-}
-$use24HourTime = ($twcModelMaxAmps < 40);
-$standardAmps = build_standard_amps($twcModelMaxAmps, $status['wiring_max_amps'], $status['min_amps_per_twc']);
-$hourOptions = build_hour_options($use24HourTime);
-$scheduledAmpDays = array();
-for($i = 0; $i < 7; $i++) {
-    $scheduledAmpDays[$i] = (($status['scheduled_days_bitmap'] & (1 << $i)) !== 0);
-}
-?><!DOCTYPE html>
+<?php require_once __DIR__ . '/lib/index_bootstrap.php'; ?>
+<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="utf-8">
-    <title><?=($pageMode === 'debug' ? 'TWCDebug' : 'TWCManager')?></title>
+    <title><?=h($pageTitle)?></title>
     <link rel="icon" type="image/png" href="favicon.png">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
@@ -636,6 +134,39 @@ for($i = 0; $i < 7; $i++) {
         .panel h2 {
             font-size: 1.45rem;
             margin-bottom: 8px;
+        }
+        .page-title {
+            margin: 0 0 6px;
+            font-size: 2.7rem;
+            letter-spacing: -0.04em;
+        }
+        .page-subtitle {
+            margin: 0;
+            color: var(--muted);
+            max-width: 760px;
+            line-height: 1.6;
+        }
+        .section-block {
+            margin-top: 20px;
+        }
+        .section-heading {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            gap: 12px;
+            margin: 0 0 10px;
+        }
+        .section-heading h2 {
+            margin: 0;
+            font-size: 1.05rem;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: var(--accent-deep);
+        }
+        .section-heading p {
+            margin: 0;
+            color: var(--muted);
+            font-size: 0.95rem;
         }
         .grid {
             display: grid;
@@ -810,6 +341,13 @@ for($i = 0; $i < 7; $i++) {
             margin-top: 14px;
             border-radius: 14px;
         }
+        .callout strong {
+            display: block;
+            margin-bottom: 6px;
+        }
+        .callout form {
+            margin-top: 12px;
+        }
         .subnav {
             display: flex;
             flex-wrap: wrap;
@@ -885,6 +423,81 @@ for($i = 0; $i < 7; $i++) {
             font-weight: 700;
             margin-bottom: 8px;
         }
+        .chart-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 14px;
+            margin-top: 18px;
+        }
+        .chart-card {
+            background: var(--panel-strong);
+            border: 1px solid var(--line);
+            border-radius: 14px;
+            padding: 14px;
+        }
+        .chart-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 12px;
+            margin-bottom: 10px;
+        }
+        .chart-head h3 {
+            margin: 0 0 4px;
+        }
+        .chart-legend {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            color: var(--muted);
+            font-size: 0.84rem;
+        }
+        .legend-item {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .legend-swatch {
+            width: 14px;
+            height: 3px;
+            border-radius: 999px;
+            display: inline-block;
+        }
+        .legend-swatch.solar {
+            background: #2f8a58;
+        }
+        .legend-swatch.grid {
+            background: #b44824;
+        }
+        .line-chart {
+            width: 100%;
+            height: 210px;
+            display: block;
+        }
+        .chart-grid-line {
+            stroke: rgba(97, 113, 123, 0.22);
+            stroke-width: 1;
+        }
+        .chart-axis-label {
+            fill: #6a7881;
+            font-size: 10px;
+        }
+        .chart-line {
+            fill: none;
+            stroke-width: 3;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+        .chart-line.solar,
+        .chart-point.solar {
+            stroke: #2f8a58;
+            fill: #2f8a58;
+        }
+        .chart-line.grid,
+        .chart-point.grid {
+            stroke: #b44824;
+            fill: #b44824;
+        }
         @media (max-width: 920px) {
             .hero,
             .grid {
@@ -893,7 +506,8 @@ for($i = 0; $i < 7; $i++) {
             }
             .summary-grid,
             .twc-stats,
-            .field-grid {
+            .field-grid,
+            .chart-grid {
                 grid-template-columns: 1fr 1fr;
             }
         }
@@ -904,7 +518,8 @@ for($i = 0; $i < 7; $i++) {
             .summary-grid,
             .twc-stats,
             .field-grid,
-            .policy-grid {
+            .policy-grid,
+            .chart-grid {
                 grid-template-columns: 1fr;
             }
             .hero-actions {
@@ -918,13 +533,13 @@ for($i = 0; $i < 7; $i++) {
     <div class="hero">
         <div>
             <span class="hero-kicker">Gen2 Wall Connector Control</span>
-            <h1>TWCManager</h1>
-            <p>Control Tesla Wall Connector Gen2 charging, review live RS-485 status, and adjust schedules and green-energy policy from one page.</p>
+            <h1 class="page-title">TWCManager Control Panel</h1>
+            <p class="page-subtitle">Monitor the live RS-485 status, review the active charging policy, and adjust Wall Connector behavior from one page.</p>
         </div>
         <div class="hero-actions">
-            <a class="button ghost" href="<?=h(page_url())?>">Main View</a>
-            <a class="button ghost" href="<?=h(page_url(array('debugTWC' => 1)))?>">Debug Menu</a>
-            <a class="button ghost" href="tesla_callback.php">Tesla Token Helper</a>
+            <a class="button ghost" href="<?=h($mainViewUrl)?>">Main View</a>
+            <a class="button ghost" href="<?=h($debugMenuUrl)?>">Debug Menu</a>
+            <a class="button ghost" href="<?=h($teslaHelperUrl)?>">Tesla Token Helper</a>
         </div>
     </div>
 
@@ -936,7 +551,7 @@ for($i = 0; $i < 7; $i++) {
     <div class="flash error"><?=h($flashError)?></div>
     <?php endif; ?>
 
-    <?php if(!$status['valid']): ?>
+    <?php if(!$statusValid): ?>
     <div class="flash error">No valid status response was received from TWCManager. Verify that the Python process is running, that <code>$twcScriptDir</code> is correct, and that PHP can access the SysV IPC queue.</div>
     <?php endif; ?>
 
@@ -966,9 +581,9 @@ for($i = 0; $i < 7; $i++) {
         </div>
 
         <div class="debug-links">
-            <a class="button ghost" href="<?=h(page_url(array('sendTWCMsg' => '', 'submit' => 1)))?>">Send RS-485 Message</a>
-            <a class="button ghost" href="<?=h(page_url(array('setMasterHeartbeatData' => '', 'submit' => 1)))?>">Override Master Heartbeat</a>
-            <a class="button ghost" href="<?=h(page_url(array('dumpState' => 1, 'submit' => 1)))?>">Dump Internal State</a>
+            <a class="button ghost" href="<?=h($sendMessageUrl)?>">Send RS-485 Message</a>
+            <a class="button ghost" href="<?=h($heartbeatUrl)?>">Override Master Heartbeat</a>
+            <a class="button ghost" href="<?=h($dumpStateUrl)?>">Dump Internal State</a>
         </div>
     </div>
     <?php elseif($pageMode === 'send'): ?>
@@ -983,7 +598,7 @@ for($i = 0; $i < 7; $i++) {
             </div>
             <div class="inline-actions">
                 <input type="submit" name="submit" value="Submit">
-                <a class="button ghost" href="<?=h(page_url(array('debugTWC' => 1)))?>">Back To Debug Menu</a>
+                <a class="button ghost" href="<?=h($debugMenuUrl)?>">Back To Debug Menu</a>
             </div>
         </form>
 
@@ -1016,8 +631,8 @@ for($i = 0; $i < 7; $i++) {
             </div>
             <div class="inline-actions">
                 <input type="submit" name="submit" value="Submit">
-                <a class="button ghost" href="<?=h(page_url(array('setMasterHeartbeatData' => '', 'submit' => 1)))?>">Clear Override</a>
-                <a class="button ghost" href="<?=h(page_url(array('debugTWC' => 1)))?>">Back To Debug Menu</a>
+                <a class="button ghost" href="<?=h($heartbeatUrl)?>">Clear Override</a>
+                <a class="button ghost" href="<?=h($debugMenuUrl)?>">Back To Debug Menu</a>
             </div>
         </form>
         <div class="subnav">
@@ -1040,12 +655,17 @@ for($i = 0; $i < 7; $i++) {
             </div>
             <div class="inline-actions">
                 <input type="submit" name="submit" value="Refresh">
-                <a class="button ghost" href="<?=h(page_url(array('debugTWC' => 1)))?>">Back To Debug Menu</a>
+                <a class="button ghost" href="<?=h($debugMenuUrl)?>">Back To Debug Menu</a>
             </div>
         </form>
     </div>
     <?php endif; ?>
 
+    <div class="section-block">
+        <div class="section-heading">
+            <h2>Overview</h2>
+            <p>Current backend status and key charge limits.</p>
+        </div>
     <div class="panel">
         <div class="section-note">
             <div>
@@ -1053,28 +673,26 @@ for($i = 0; $i < 7; $i++) {
                 <p class="muted">Current charger state from the running TWCManager process. This page refreshes automatically every 10 seconds.</p>
             </div>
             <div class="health-badge">
-                <span class="health-dot <?=($status['valid'] ? 'good' : '')?>"></span>
-                <?=($status['valid'] ? 'Backend reachable' : 'Backend unavailable')?>
+                <span class="health-dot <?=h($backendBadgeClass)?>"></span>
+                <?=h($backendBadgeText)?>
             </div>
         </div>
         <div class="summary-grid">
-            <div class="metric">
-                <span class="label">Power Available</span>
-                <span class="value"><?=($status['available_amps'] > 0 ? h(number_format($status['available_amps'], 2)) . 'A' : 'None')?></span>
-            </div>
-            <div class="metric">
-                <span class="label">Wiring Limit</span>
-                <span class="value"><?=h(number_format($status['wiring_max_amps'], 0))?>A</span>
-            </div>
-            <div class="metric">
-                <span class="label">Minimum Charge</span>
-                <span class="value"><?=h(number_format($status['min_amps_per_twc'], 0))?>A</span>
-            </div>
-            <div class="metric">
-                <span class="label">24-Hour Override</span>
-                <span class="value"><?=($status['charge_now_amps'] > 0 ? h(number_format($status['charge_now_amps'], 2)) . 'A' : 'Off')?></span>
-            </div>
+            <?php render_metric('Power Available', $availableAmpsDisplay); ?>
+            <?php render_metric('Wiring Limit', $wiringLimitDisplay); ?>
+            <?php render_metric('Minimum Charge', $minChargeDisplay); ?>
+            <?php render_metric('24-Hour Override', $chargeNowDisplay); ?>
         </div>
+
+        <?php if($chargeNowActive): ?>
+        <div class="callout">
+            <strong>1-day charge is active.</strong>
+            TWCManager is forcing normal charging for approximately <?=h($chargeNowRemainingDisplay)?> more.
+            <form action="index.php" method="get">
+                <input type="submit" name="submit" value="Cancel 1-day charge">
+            </form>
+        </div>
+        <?php endif; ?>
 
         <?php if($status['need_tesla_tokens']): ?>
         <div class="callout">
@@ -1084,78 +702,19 @@ for($i = 0; $i < 7; $i++) {
         </div>
         <?php endif; ?>
     </div>
+    </div>
 
-    <div class="grid">
-        <div>
-            <div class="panel">
-                <div class="section-note">
-                    <div>
-                        <h2>Managed Wall Connectors</h2>
-                        <p class="muted">Per-charger telemetry from the RS-485 heartbeat stream.</p>
-                    </div>
-                    <div class="health-badge"><?=count($status['twcs'])?> detected</div>
-                </div>
-                <?php if(count($status['twcs']) === 0): ?>
-                <p class="muted">No slave TWCs were reported on the RS-485 network.</p>
-                <?php else: ?>
-                <div class="twc-list">
-                    <?php foreach($status['twcs'] as $twc): ?>
-                    <article class="twc-card">
-                        <header>
-                            <h3>TWC <?=h($twc['id'])?></h3>
-                            <span class="twc-state">State <?=h($twc['state'])?></span>
-                        </header>
-                        <div class="twc-stats">
-                            <div class="stat">
-                                <span class="label">Actual</span>
-                                <span class="value"><?=h(number_format($twc['actual_amps'], 2))?>A</span>
-                            </div>
-                            <div class="stat">
-                                <span class="label">Offered</span>
-                                <span class="value"><?=h(number_format($twc['offered_amps'], 2))?>A</span>
-                            </div>
-                            <div class="stat">
-                                <span class="label">Model Max</span>
-                                <span class="value"><?=h(number_format($twc['max_amps'], 0))?>A</span>
-                            </div>
-                            <div class="stat">
-                                <span class="label">Headroom</span>
-                                <span class="value"><?=h(number_format(max(0, $twc['offered_amps'] - $twc['actual_amps']), 2))?>A</span>
-                            </div>
-                        </div>
-                        <div class="muted"><?=h(describe_twc_state($twc, $status['available_amps'], $status['min_amps_per_twc']))?></div>
-                    </article>
-                    <?php endforeach; ?>
-                </div>
-                <?php endif; ?>
-            </div>
+    <div class="section-block">
+        <div class="section-heading">
+            <h2>Control</h2>
+            <p>Active policy first, editable settings underneath.</p>
         </div>
-
-        <div>
+        <div class="grid">
             <div class="panel">
                 <h2>Charging Policy</h2>
                 <div class="policy-grid">
-                    <div class="policy-card">
-                        <span class="eyebrow">Scheduled Power</span>
-                        <div class="main"><?=($status['scheduled_amps'] === '-1' ? 'Disabled' : h($status['scheduled_amps']) . 'A')?></div>
-                        <div class="muted">
-                            <?=h(format_time_label($status['scheduled_start']))?> to <?=h(format_time_label($status['scheduled_end']))?><br>
-                            <?=h(format_day_bitmap($status['scheduled_days_bitmap']))?>
-                        </div>
-                    </div>
-                    <div class="policy-card">
-                        <span class="eyebrow">Non-Scheduled Power</span>
-                        <div class="main">
-                            <?php if($status['non_scheduled_amps'] === '-1'): ?>
-                            Track green energy
-                            <?php else: ?>
-                            <?=h($status['non_scheduled_amps'])?>A
-                            <?php endif; ?>
-                        </div>
-                        <div class="muted">
-                            Resume green energy at <?=h(format_time_label($status['resume_track_green_energy_time']))?>
-                        </div>
-                    </div>
+                    <?php render_policy_card('Scheduled Power', $scheduledPowerDisplay, $scheduledTimeDisplay . '<br>' . $scheduledDaysDisplay); ?>
+                    <?php render_policy_card('Non-Scheduled Power', $nonScheduledPowerDisplay, 'Resume green energy at ' . $resumeGreenDisplay); ?>
                 </div>
             </div>
 
@@ -1186,12 +745,7 @@ for($i = 0; $i < 7; $i++) {
                         <div class="field full" id="scheduledDaysField">
                             <label>Scheduled Days</label>
                             <div class="days">
-                                <?php
-                                $dayLabels = array('Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su');
-                                for($i = 0; $i < 7; $i++):
-                                ?>
-                                <label><?php render_checkbox("scheduledAmpsDay[$i]", $scheduledAmpDays[$i]); ?> <?=$dayLabels[$i]?></label>
-                                <?php endfor; ?>
+                                <?php render_day_checkboxes($scheduledAmpDays); ?>
                             </div>
                         </div>
 
@@ -1217,14 +771,61 @@ for($i = 0; $i < 7; $i++) {
 
                     <div class="inline-actions">
                         <input type="submit" name="submit" value="Save">
-                        <?php if($status['charge_now_amps'] > 0): ?>
+                        <?php if($chargeNowActive): ?>
                         <input type="submit" name="submit" value="Cancel 1-day charge">
                         <?php else: ?>
-                        <input type="submit" name="submit" value="1-day charge, <?=h(number_format($status['wiring_max_amps'], 0))?>A">
+                        <input type="submit" name="submit" value="<?=h($chargeNowButtonLabel)?>">
                         <?php endif; ?>
                     </div>
                 </form>
             </div>
+        </div>
+    </div>
+
+    <div class="section-block">
+        <div class="section-heading">
+            <h2>Energy</h2>
+            <p>Delivered energy totals from the stored cumulative kWh counter.</p>
+        </div>
+        <div class="panel">
+            <div class="section-note">
+                <div>
+                    <h2>Charging History</h2>
+                    <p class="muted">Approximate solar and grid energy delivered over hourly, daily and monthly views.</p>
+                </div>
+                <div class="health-badge"><?=h($totalDeliveredDisplay)?></div>
+            </div>
+            <div class="chart-grid">
+                <?php render_energy_line_chart('Today', 'Hourly energy for the current day.', $energyHistoryCharts['today']); ?>
+                <?php render_energy_line_chart('This Week', 'Daily energy for the current ISO week.', $energyHistoryCharts['week']); ?>
+                <?php render_energy_line_chart('Last 30 Days', 'Daily energy across the last 30 days.', $energyHistoryCharts['month']); ?>
+                <?php render_energy_line_chart('Last 12 Months', 'Monthly energy totals.', $energyHistoryCharts['year']); ?>
+            </div>
+        </div>
+    </div>
+
+    <div class="section-block">
+        <div class="section-heading">
+            <h2>Chargers</h2>
+            <p>Detected Wall Connectors and their live telemetry.</p>
+        </div>
+        <div class="panel">
+            <div class="section-note">
+                <div>
+                    <h2>Managed Wall Connectors</h2>
+                    <p class="muted">Per-charger telemetry from the RS-485 heartbeat stream.</p>
+                </div>
+                <div class="health-badge"><?=h($detectedTwcLabel)?></div>
+            </div>
+            <?php if($detectedTwcCount === 0): ?>
+            <p class="muted">No slave TWCs were reported on the RS-485 network.</p>
+            <?php else: ?>
+            <div class="twc-list">
+                <?php foreach($status['twcs'] as $twc): ?>
+                <?php render_twc_card($twc, $status['available_amps'], $status['min_amps_per_twc']); ?>
+                <?php endforeach; ?>
+            </div>
+            <?php endif; ?>
         </div>
     </div>
 </div>

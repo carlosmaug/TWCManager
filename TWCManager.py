@@ -619,6 +619,135 @@ homeLon={homeLon}
         )
 
 
+class EnergyHistoryStore:
+    """Persist delivered-energy history with solar/grid breakdown."""
+    def __init__(self, general_config):
+        self.file_name = re.sub(r'/[^/]+$', r'/TWCManagerEnergyHistory.json',
+                                general_config.settings_file_name)
+
+    def load(self):
+        try:
+            fh = open(self.file_name, 'r')
+        except FileNotFoundError:
+            return {
+                'version': 1,
+                'last_total_kwh': 0.0,
+                'last_update_ts': 0.0,
+                'hourly': {},
+                'daily': {},
+            }
+
+        try:
+            payload = json.load(fh)
+        except json.JSONDecodeError:
+            print(time_now() + ': ERROR: Energy history file contains invalid JSON: ' + self.file_name)
+            payload = {}
+        finally:
+            fh.close()
+
+        if(not isinstance(payload, dict)):
+            payload = {}
+
+        hourly = payload.get('hourly', {})
+        if(not isinstance(hourly, dict)):
+            hourly = {}
+        daily = payload.get('daily', {})
+        if(not isinstance(daily, dict)):
+            daily = {}
+
+        return {
+            'version': 1,
+            'last_total_kwh': max(0.0, float(payload.get('last_total_kwh', 0.0))),
+            'last_update_ts': max(0.0, float(payload.get('last_update_ts', 0.0))),
+            'hourly': self._clean_hourly(hourly),
+            'daily': self._clean_daily(daily),
+        }
+
+    def save(self, history):
+        fh = open(self.file_name, 'w')
+        try:
+            json.dump(history, fh, indent=2, sort_keys=True)
+            fh.write('\n')
+        finally:
+            fh.close()
+
+    def _normalize_bucket(self, value):
+        if(isinstance(value, dict)):
+            solar = max(0.0, float(value.get('solar', 0.0)))
+            grid = max(0.0, float(value.get('grid', 0.0)))
+            total = max(0.0, float(value.get('total', solar + grid)))
+            if(total < solar + grid):
+                total = solar + grid
+            return {
+                'solar': solar,
+                'grid': grid,
+                'total': total,
+            }
+
+        try:
+            total = max(0.0, float(value))
+        except (TypeError, ValueError):
+            total = 0.0
+
+        return {
+            'solar': 0.0,
+            'grid': total,
+            'total': total,
+        }
+
+    def _clean_hourly(self, hourly):
+        cleaned = {}
+        for key, value in hourly.items():
+            if(re.match(r'^\d{4}-\d{2}-\d{2}T\d{2}$', str(key))):
+                cleaned[str(key)] = self._normalize_bucket(value)
+        return cleaned
+
+    def _clean_daily(self, daily):
+        cleaned = {}
+        for key, value in daily.items():
+            if(re.match(r'^\d{4}-\d{2}-\d{2}$', str(key))):
+                cleaned[str(key)] = self._normalize_bucket(value)
+        return cleaned
+
+    def record_delta(self, history, start_ts, end_ts, solar_kwh, grid_kwh, total_kwh):
+        if(history == None):
+            history = self.load()
+
+        start_ts = float(start_ts)
+        end_ts = float(end_ts)
+        solar_kwh = max(0.0, float(solar_kwh))
+        grid_kwh = max(0.0, float(grid_kwh))
+        total_kwh = max(0.0, float(total_kwh))
+        hourly = dict(history.get('hourly', {}))
+        daily = dict(history.get('daily', {}))
+
+        if(end_ts > start_ts and (solar_kwh > 0 or grid_kwh > 0)):
+            hourly_allocations = allocate_delta_by_hour(start_ts, end_ts, solar_kwh, grid_kwh)
+            for hour_key, values in hourly_allocations.items():
+                bucket = self._normalize_bucket(hourly.get(hour_key, {}))
+                bucket['solar'] = round(bucket['solar'] + values['solar'], 6)
+                bucket['grid'] = round(bucket['grid'] + values['grid'], 6)
+                bucket['total'] = round(bucket['solar'] + bucket['grid'], 6)
+                hourly[hour_key] = bucket
+
+            daily_allocations = allocate_delta_by_day_breakdown(start_ts, end_ts, solar_kwh, grid_kwh)
+            for day_key, values in daily_allocations.items():
+                bucket = self._normalize_bucket(daily.get(day_key, {}))
+                bucket['solar'] = round(bucket['solar'] + values['solar'], 6)
+                bucket['grid'] = round(bucket['grid'] + values['grid'], 6)
+                bucket['total'] = round(bucket['solar'] + bucket['grid'], 6)
+                daily[day_key] = bucket
+
+        history = {
+            'version': 2,
+            'last_total_kwh': total_kwh,
+            'last_update_ts': end_ts,
+            'hourly': prune_hourly_history(hourly),
+            'daily': prune_daily_history(daily),
+        }
+        return history
+
+
 class GreenEnergyMonitor:
     """Translate external solar telemetry into available charging current."""
     def __init__(self, config, lock, state=None):
@@ -663,6 +792,7 @@ class GreenEnergyMonitor:
             maxAmpsToDivideAmongSlaves = int(solarW / 240) + self.config.green_energy_amps_offset
             if(self.state != None):
                 self.state.maxAmpsToDivideAmongSlaves = maxAmpsToDivideAmongSlaves
+                self.state.greenEnergyAvailableAmps = max(0.0, float(maxAmpsToDivideAmongSlaves))
             if (debugLevel >= 2):
                 print("%s: Solar generating %dW so limit car charging to:\n" \
                      "          %.2fA + %.2fA = %.2fA.  Charge when above %.0fA (minAmpsPerTWC)." % \
@@ -1409,6 +1539,227 @@ def trim_pad(s:bytearray, makeLen):
         s = s[0:makeLen]
 
     return s
+
+
+def prune_daily_history(daily, keep_days=400):
+    items = sorted(daily.items())
+    if(len(items) <= keep_days):
+        return dict(items)
+    return dict(items[-keep_days:])
+
+
+def prune_hourly_history(hourly, keep_hours=24 * 45):
+    items = sorted(hourly.items())
+    if(len(items) <= keep_hours):
+        return dict(items)
+    return dict(items[-keep_hours:])
+
+
+def allocate_breakdown(start_ts, end_ts, solar_kwh, grid_kwh, bucket_format, step):
+    allocations = {}
+    if((solar_kwh <= 0 and grid_kwh <= 0) or end_ts < start_ts):
+        return allocations
+
+    start_dt = datetime.fromtimestamp(start_ts)
+    end_dt = datetime.fromtimestamp(end_ts)
+    total_seconds = max(end_ts - start_ts, 1.0)
+    cursor = start_dt
+
+    while cursor < end_dt:
+        segment_end = min(step(cursor), end_dt)
+        segment_seconds = max((segment_end - cursor).total_seconds(), 0.0)
+        bucket_key = cursor.strftime(bucket_format)
+        if(bucket_key not in allocations):
+            allocations[bucket_key] = {'solar': 0.0, 'grid': 0.0, 'total': 0.0}
+        allocations[bucket_key]['solar'] += solar_kwh * (segment_seconds / total_seconds)
+        allocations[bucket_key]['grid'] += grid_kwh * (segment_seconds / total_seconds)
+        allocations[bucket_key]['total'] = allocations[bucket_key]['solar'] + allocations[bucket_key]['grid']
+        cursor = segment_end
+
+    if(len(allocations) == 0):
+        allocations[start_dt.strftime(bucket_format)] = {
+            'solar': solar_kwh,
+            'grid': grid_kwh,
+            'total': solar_kwh + grid_kwh,
+        }
+
+    return allocations
+
+
+def allocate_delta_by_day_breakdown(start_ts, end_ts, solar_kwh, grid_kwh):
+    return allocate_breakdown(
+        start_ts,
+        end_ts,
+        solar_kwh,
+        grid_kwh,
+        '%Y-%m-%d',
+        lambda cursor: (cursor + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0),
+    )
+
+
+def allocate_delta_by_hour(start_ts, end_ts, solar_kwh, grid_kwh):
+    return allocate_breakdown(
+        start_ts,
+        end_ts,
+        solar_kwh,
+        grid_kwh,
+        '%Y-%m-%dT%H',
+        lambda cursor: (cursor + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0),
+    )
+
+
+def calculate_energy_periods(history, now_ts=None):
+    if(now_ts == None):
+        now_ts = time.time()
+
+    now_dt = datetime.fromtimestamp(now_ts)
+    daily = history.get('daily', {}) if history != None else {}
+    today_key = now_dt.strftime('%Y-%m-%d')
+    iso_year, iso_week, _ = now_dt.isocalendar()
+    current_month = now_dt.strftime('%Y-%m')
+    current_year = now_dt.strftime('%Y')
+
+    periods = {
+        'today': 0.0,
+        'week': 0.0,
+        'month': 0.0,
+        'year': 0.0,
+    }
+
+    for day_key, value in daily.items():
+        try:
+            day_dt = datetime.strptime(day_key, '%Y-%m-%d')
+            if(isinstance(value, dict)):
+                amount = max(0.0, float(value.get('total', value.get('solar', 0.0) + value.get('grid', 0.0))))
+            else:
+                amount = max(0.0, float(value))
+        except (TypeError, ValueError):
+            continue
+
+        if(day_key == today_key):
+            periods['today'] += amount
+        if(day_dt.strftime('%Y-%m') == current_month):
+            periods['month'] += amount
+        if(day_dt.strftime('%Y') == current_year):
+            periods['year'] += amount
+
+        day_iso_year, day_iso_week, _ = day_dt.isocalendar()
+        if(day_iso_year == iso_year and day_iso_week == iso_week):
+            periods['week'] += amount
+
+    return periods
+
+
+def build_energy_chart_payload(history, now_ts=None):
+    if(now_ts == None):
+        now_ts = time.time()
+
+    now_dt = datetime.fromtimestamp(now_ts)
+    hourly = history.get('hourly', {}) if history != None else {}
+    daily = history.get('daily', {}) if history != None else {}
+
+    today_labels = []
+    today_solar = []
+    today_grid = []
+    for hour in range(24):
+        dt = now_dt.replace(hour=hour, minute=0, second=0, microsecond=0)
+        key = dt.strftime('%Y-%m-%dT%H')
+        bucket = hourly.get(key, {})
+        today_labels.append(dt.strftime('%H:00'))
+        today_solar.append(round(float(bucket.get('solar', 0.0)), 3))
+        today_grid.append(round(float(bucket.get('grid', 0.0)), 3))
+
+    week_labels = []
+    week_solar = []
+    week_grid = []
+    week_start = (now_dt - timedelta(days=now_dt.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+    for offset in range(7):
+        dt = week_start + timedelta(days=offset)
+        key = dt.strftime('%Y-%m-%d')
+        bucket = daily.get(key, {})
+        week_labels.append(dt.strftime('%a'))
+        week_solar.append(round(float(bucket.get('solar', 0.0)), 3))
+        week_grid.append(round(float(bucket.get('grid', 0.0)), 3))
+
+    month_labels = []
+    month_solar = []
+    month_grid = []
+    month_start = (now_dt - timedelta(days=29)).replace(hour=0, minute=0, second=0, microsecond=0)
+    for offset in range(30):
+        dt = month_start + timedelta(days=offset)
+        key = dt.strftime('%Y-%m-%d')
+        bucket = daily.get(key, {})
+        month_labels.append(dt.strftime('%d %b'))
+        month_solar.append(round(float(bucket.get('solar', 0.0)), 3))
+        month_grid.append(round(float(bucket.get('grid', 0.0)), 3))
+
+    year_labels = []
+    year_solar = []
+    year_grid = []
+    for months_back in range(11, -1, -1):
+        month_dt = (now_dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0))
+        month_number = month_dt.month - months_back
+        year_number = month_dt.year
+        while month_number <= 0:
+            month_number += 12
+            year_number -= 1
+        while month_number > 12:
+            month_number -= 12
+            year_number += 1
+
+        solar_total = 0.0
+        grid_total = 0.0
+        month_prefix = '%04d-%02d-' % (year_number, month_number)
+        for day_key, bucket in daily.items():
+            if(str(day_key).startswith(month_prefix)):
+                solar_total += float(bucket.get('solar', 0.0))
+                grid_total += float(bucket.get('grid', 0.0))
+
+        label_dt = datetime(year_number, month_number, 1)
+        year_labels.append(label_dt.strftime('%b'))
+        year_solar.append(round(solar_total, 3))
+        year_grid.append(round(grid_total, 3))
+
+    return {
+        'today': {'labels': today_labels, 'solar': today_solar, 'grid': today_grid},
+        'week': {'labels': week_labels, 'solar': week_solar, 'grid': week_grid},
+        'month': {'labels': month_labels, 'solar': month_solar, 'grid': month_grid},
+        'year': {'labels': year_labels, 'solar': year_solar, 'grid': year_grid},
+    }
+
+
+def update_energy_tracking(state, now, general_config=None):
+    global energy_history_store
+
+    debug_level = general_config.debug_level if general_config != None else debugLevel
+    if(general_config != None and general_config.fake_master != 1):
+        state.timeLastkWhDelivered = now
+        return
+
+    elapsed = now - state.timeLastkWhDelivered
+    if(elapsed <= 0):
+        return
+
+    total_amps = total_amps_actual_all_twcs(state, general_config)
+    solar_amps = min(total_amps, max(0.0, float(getattr(state, 'greenEnergyAvailableAmps', 0.0))))
+    grid_amps = max(0.0, total_amps - solar_amps)
+    solar_kwh = ((240 * solar_amps) / 1000 / 60 / 60) * elapsed
+    grid_kwh = ((240 * grid_amps) / 1000 / 60 / 60) * elapsed
+    state.kWhDelivered += (solar_kwh + grid_kwh)
+    state.timeLastkWhDelivered = now
+
+    if(energy_history_store != None):
+        state.energyHistory = energy_history_store.record_delta(
+            state.energyHistory, now - elapsed, now, solar_kwh, grid_kwh, state.kWhDelivered
+        )
+
+    if(time.time() - state.timeLastkWhSaved >= 300.0):
+        state.timeLastkWhSaved = now
+        if(debug_level >= 9):
+            print(time_now() + ": Delivered %.3fkWh total" % (state.kWhDelivered))
+        if(energy_history_store != None):
+            energy_history_store.save(state.energyHistory)
+        save_settings(state)
 
 
 def is_time_in_window(hour_now, start_hour, end_hour):
@@ -3052,6 +3403,7 @@ backgroundTasksThread = None
 ser = None
 webIPCqueue = None
 webIPCkey = None
+energy_history_store = None
 
 #
 # End global vars
@@ -3092,9 +3444,16 @@ class RuntimeState:
         self.spikeAmpsToCancel6ALimit = 16
         self.timeLastGreenEnergyCheck = 0
         self.hourResumeTrackGreenEnergy = -1
+        self.greenEnergyAvailableAmps = 0.0
         self.kWhDelivered = 119
         self.timeLastkWhDelivered = time.time()
         self.timeLastkWhSaved = time.time()
+        self.energyHistory = {
+            'version': 1,
+            'last_total_kwh': 0.0,
+            'last_update_ts': 0.0,
+            'daily': {},
+        }
         self.nonScheduledAmpsMax = -1
         self.timeTo0Aafter06 = 0
         self.timeToRaise2A = 0
@@ -3103,6 +3462,7 @@ class TWCManagerApp:
     """Wire dependencies together and run the main charger-control loop."""
     def __init__(self):
         global settings_store, tesla_token_store, tesla_car_api, green_energy_monitor, \
+               energy_history_store, \
                background_task_runner, backgroundTasksQueue, backgroundTasksCmds, \
                backgroundTasksLock, backgroundTasksThread, rs485_transport, ser, \
                web_ipc_server, webIPCkey, webIPCqueue
@@ -3136,8 +3496,10 @@ class TWCManagerApp:
         self.web_ipc_config = WebIPCConfig(script_path=__file__)
         self.state = RuntimeState()
         settings_store = SettingsStore(self.general_config)
+        energy_history_store = EnergyHistoryStore(self.general_config)
         tesla_token_store = TeslaTokenStore(teslaApiTokenFileName)
         tesla_car_api = TeslaCarApi(self.tesla_api_config, tesla_token_store)
+        self.state.energyHistory = energy_history_store.load()
         load_settings(
             self.state,
             tesla_car_api,
@@ -3187,6 +3549,7 @@ class TWCManagerApp:
                 time.sleep(0.025)
 
                 now = time.time()
+                update_energy_tracking(state, now, general_config)
 
                 if(general_config.fake_master == 1):
                     if(state.numInitMsgsToSend > 5):
@@ -3244,6 +3607,7 @@ class TWCManagerApp:
                         numPackets = 0
                         if(webMsg == b'getStatus'):
                             needCarApiBearerToken = False
+                            energy_periods = calculate_energy_periods(state.energyHistory, now)
                             if(tesla_car_api != None and tesla_car_api.has_tokens() == False):
                                 for i in range(0, len(state.slaveTWCRoundRobin)):
                                     if(state.slaveTWCRoundRobin[i].protocolVersion == 2):
@@ -3264,6 +3628,12 @@ class TWCManagerApp:
                                 '`' + "%02d:%02d" % (int(state.hourResumeTrackGreenEnergy),
                                                      int((state.hourResumeTrackGreenEnergy % 1) * 60)) +
                                 '`' + ('1' if needCarApiBearerToken else '0') +
+                                '`' + str(int(max(0, state.chargeNowTimeEnd - now))) +
+                                '`' + ("%.3f" % (state.kWhDelivered)) +
+                                '`' + ("%.3f" % (energy_periods['today'])) +
+                                '`' + ("%.3f" % (energy_periods['week'])) +
+                                '`' + ("%.3f" % (energy_periods['month'])) +
+                                '`' + ("%.3f" % (energy_periods['year'])) +
                                 '`' + str(len(state.slaveTWCRoundRobin))
                                 )
 
@@ -3318,6 +3688,9 @@ class TWCManagerApp:
                                 webResponseMsg = hex_str(state.lastTWCResponseMsg)
                             else:
                                 webResponseMsg = 'None'
+                        elif(webMsg == b'getEnergyHistory'):
+                            webResponseMsg = json.dumps(build_energy_chart_payload(state.energyHistory, now), separators=(',', ':'))
+                            numPackets = math.ceil(len(webResponseMsg) / 290)
                         elif(webMsg[0:13] == b'carApiTokens='):
                             try:
                                 tokenPayload = json.loads(webMsg[13:len(webMsg)].decode('utf-8'))
@@ -3649,13 +4022,22 @@ class TWCManagerApp:
                                 continue
 
                             amps = (state.slaveHeartbeatData[1] << 8) + state.slaveHeartbeatData[2]
-                            state.kWhDelivered += (((240 * (amps/100)) / 1000 / 60 / 60) * (now - state.timeLastkWhDelivered))
+                            fake_slave_elapsed = max(0.0, now - state.timeLastkWhDelivered)
+                            fake_slave_delta = (((240 * (amps/100)) / 1000 / 60 / 60) * fake_slave_elapsed)
+                            state.kWhDelivered += fake_slave_delta
                             state.timeLastkWhDelivered = now
+                            if(energy_history_store != None):
+                                state.energyHistory = energy_history_store.record_delta(
+                                    state.energyHistory, now - fake_slave_elapsed, now,
+                                    0.0, fake_slave_delta, state.kWhDelivered
+                                )
                             if(time.time() - state.timeLastkWhSaved >= 300.0):
                                 state.timeLastkWhSaved = now
                                 if(general_config.debug_level >= 9):
                                     print(time_now() + ": Fake slave has delivered %.3fkWh" % \
                                        (state.kWhDelivered))
+                                if(energy_history_store != None):
+                                    energy_history_store.save(state.energyHistory)
                                 save_settings(state)
 
                             if(heartbeatData[0] == 0x07):

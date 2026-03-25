@@ -5,10 +5,22 @@ This directory contains the PHP-based web components that accompany `TWCManager.
 ## Files
 
 - `index.php`
-  Main web UI for a running TWCManager instance. It talks to `TWCManager.py`
-  through a SysV IPC message queue, displays charger state, and lets you change
-  charge policy values such as scheduled amps, non-scheduled amps, green-energy
-  resume time, and the 24-hour `chargeNow` override.
+  Thin view/controller entry point for the main web UI. It renders the page for
+  a running TWCManager instance using the data and helpers prepared under
+  `HTML/lib/`.
+
+- `lib/config.php`
+  Local configuration values for the PHP UI, especially `$twcScriptDir`, which
+  must point to the directory containing `TWCManager.py`.
+
+- `lib/functions.php`
+  Shared helper functions for request parsing, IPC, formatting, and repeated UI
+  rendering.
+
+- `lib/index_bootstrap.php`
+  The bootstrap/controller layer for `index.php`. It loads configuration,
+  connects to the SysV IPC queue, handles incoming actions, requests current
+  status from the Python process, and prepares variables used by the view.
 
 - `tesla_callback.php`
   Tesla OAuth helper. It does not control charging directly and it does not use
@@ -24,12 +36,13 @@ This directory contains the PHP-based web components that accompany `TWCManager.
 
 ## What `index.php` Does
 
-`index.php` is the operational control page.
+`index.php` is the operational control page, but it is now intentionally thin.
+Most non-trivial PHP logic lives in `lib/`.
 
 It:
 
-- opens the SysV IPC queue derived from the TWCManager script directory
-- asks the Python process for `getStatus`
+- includes `lib/index_bootstrap.php`
+- renders the prepared status data and forms
 - shows discovered slave TWCs and current charge status
 - allows changing:
   - `nonScheduledAmpsMax`
@@ -38,17 +51,20 @@ It:
   - the 24-hour `chargeNow` override
 - exposes debug routes for low-level RS-485 experimentation
 
+The supporting PHP is split like this:
+
+- configuration lives in `lib/config.php`
+- reusable helpers live in `lib/functions.php`
+- request handling and status preparation live in `lib/index_bootstrap.php`
+- HTML/CSS markup stays in `index.php`
+
 Important:
 
 - `index.php` requires the Python process to be running
-- `$twcScriptDir` inside `index.php` must point to the directory containing
+- `$twcScriptDir` inside `lib/config.php` must point to the directory containing
   `TWCManager.py`
 - the web server user must be able to access the same SysV IPC queue as the
   Python process
-
-There is also legacy email/password UI code still present in `index.php`, but
-the current Python backend no longer supports the old credential IPC flow. The
-supported Tesla integration path is token-based.
 
 ## What `tesla_callback.php` Does
 
