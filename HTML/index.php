@@ -510,28 +510,33 @@ for($i = 0; $i < 7; $i++) {
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         :root {
-            --bg: #f2efe8;
-            --panel: #fcfaf5;
-            --panel-strong: #fffdf8;
-            --ink: #203038;
-            --muted: #61737d;
-            --line: #d6cec1;
-            --accent: #9e3d1f;
-            --accent-soft: #ead2c8;
-            --ok-bg: #edf7ef;
+            --bg: #efe8dc;
+            --bg-deep: #e4d8c3;
+            --panel: rgba(255, 251, 244, 0.92);
+            --panel-strong: #fffdf9;
+            --ink: #18313c;
+            --muted: #61717b;
+            --line: rgba(137, 111, 86, 0.22);
+            --accent: #b44824;
+            --accent-soft: #f3ddcf;
+            --accent-deep: #842f14;
+            --ok-bg: #eef8f0;
             --ok-ink: #24533b;
-            --warn-bg: #fff2e8;
+            --warn-bg: #fff1e6;
             --warn-ink: #8c3a17;
-            --shadow: 0 14px 36px rgba(48, 37, 20, 0.10);
+            --chip: #f4ebdf;
+            --shadow: 0 18px 44px rgba(49, 34, 16, 0.12);
+            --shadow-soft: 0 10px 24px rgba(49, 34, 16, 0.08);
         }
         * { box-sizing: border-box; }
         body {
             margin: 0;
             color: var(--ink);
             background:
-                radial-gradient(circle at top left, rgba(210, 168, 131, 0.30), transparent 36%),
-                linear-gradient(160deg, #efe7da 0%, var(--bg) 100%);
-            font-family: Georgia, "Times New Roman", serif;
+                radial-gradient(circle at top left, rgba(210, 168, 131, 0.34), transparent 28%),
+                radial-gradient(circle at bottom right, rgba(164, 101, 58, 0.10), transparent 32%),
+                linear-gradient(155deg, var(--bg-deep) 0%, var(--bg) 100%);
+            font-family: "Palatino Linotype", "Book Antiqua", Georgia, serif;
         }
         a {
             color: var(--accent);
@@ -546,25 +551,42 @@ for($i = 0; $i < 7; $i++) {
         .hero {
             display: flex;
             justify-content: space-between;
-            gap: 18px;
+            gap: 22px;
             align-items: flex-start;
-            margin-bottom: 18px;
+            margin-bottom: 22px;
+            padding: 24px 26px;
+            background: linear-gradient(145deg, rgba(255, 251, 244, 0.95), rgba(248, 238, 223, 0.84));
+            border: 1px solid var(--line);
+            box-shadow: var(--shadow);
+        }
+        .hero-kicker {
+            display: inline-block;
+            margin-bottom: 10px;
+            padding: 5px 10px;
+            background: var(--chip);
+            color: var(--accent-deep);
+            font-size: 0.78rem;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
         }
         .hero h1 {
             margin: 0 0 8px;
-            font-size: 2rem;
+            font-size: 2.35rem;
+            letter-spacing: -0.03em;
         }
         .hero p {
             margin: 0;
             color: var(--muted);
-            max-width: 760px;
-            line-height: 1.5;
+            max-width: 700px;
+            line-height: 1.6;
+            font-size: 1.02rem;
         }
         .hero-actions {
             display: flex;
             flex-wrap: wrap;
             gap: 10px;
             justify-content: flex-end;
+            align-self: center;
         }
         .button,
         button,
@@ -579,7 +601,15 @@ for($i = 0; $i < 7; $i++) {
             background: var(--accent);
             color: #fff;
             padding: 11px 16px;
+            border-radius: 999px;
             cursor: pointer;
+            box-shadow: var(--shadow-soft);
+            transition: transform 120ms ease, box-shadow 120ms ease, background 120ms ease;
+        }
+        .button:hover,
+        button:hover,
+        input[type="submit"]:hover {
+            transform: translateY(-1px);
             box-shadow: var(--shadow);
         }
         .button.secondary,
@@ -587,8 +617,8 @@ for($i = 0; $i < 7; $i++) {
             background: #43515a;
         }
         .button.ghost {
-            background: transparent;
-            color: var(--accent);
+            background: rgba(255,255,255,0.58);
+            color: var(--accent-deep);
             border: 1px solid var(--line);
             box-shadow: none;
         }
@@ -596,11 +626,16 @@ for($i = 0; $i < 7; $i++) {
             background: var(--panel);
             border: 1px solid var(--line);
             box-shadow: var(--shadow);
-            padding: 20px;
+            backdrop-filter: blur(8px);
+            padding: 22px;
             margin-bottom: 18px;
         }
         .panel h2, .panel h3 {
             margin-top: 0;
+        }
+        .panel h2 {
+            font-size: 1.45rem;
+            margin-bottom: 8px;
         }
         .grid {
             display: grid;
@@ -616,22 +651,35 @@ for($i = 0; $i < 7; $i++) {
         .metric {
             background: var(--panel-strong);
             border: 1px solid var(--line);
-            padding: 14px;
+            padding: 16px 16px 14px;
+            position: relative;
+            overflow: hidden;
+        }
+        .metric::before {
+            content: "";
+            position: absolute;
+            inset: 0 auto 0 0;
+            width: 4px;
+            background: linear-gradient(180deg, var(--accent), #d98c66);
         }
         .metric .label {
             display: block;
             color: var(--muted);
-            font-size: 0.9rem;
+            font-size: 0.82rem;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
             margin-bottom: 6px;
         }
         .metric .value {
-            font-size: 1.45rem;
+            font-size: 1.6rem;
             font-weight: 700;
+            letter-spacing: -0.03em;
         }
         .flash {
             padding: 13px 15px;
             margin-bottom: 18px;
             border: 1px solid var(--line);
+            box-shadow: var(--shadow-soft);
         }
         .flash.ok {
             background: var(--ok-bg);
@@ -649,6 +697,7 @@ for($i = 0; $i < 7; $i++) {
             background: var(--panel-strong);
             border: 1px solid var(--line);
             padding: 16px;
+            box-shadow: var(--shadow-soft);
         }
         .twc-card header {
             display: flex;
@@ -661,8 +710,11 @@ for($i = 0; $i < 7; $i++) {
             margin: 0;
         }
         .twc-state {
-            color: var(--muted);
-            font-size: 0.95rem;
+            color: var(--accent-deep);
+            font-size: 0.82rem;
+            background: var(--chip);
+            padding: 5px 9px;
+            border-radius: 999px;
         }
         .twc-stats {
             display: grid;
@@ -674,6 +726,7 @@ for($i = 0; $i < 7; $i++) {
             padding: 10px;
             border: 1px solid var(--line);
             background: #f8f3eb;
+            border-radius: 12px;
         }
         .stat .label {
             display: block;
@@ -716,6 +769,15 @@ for($i = 0; $i < 7; $i++) {
             padding: 10px 12px;
             font: inherit;
             color: var(--ink);
+            border-radius: 12px;
+            transition: border-color 120ms ease, box-shadow 120ms ease;
+        }
+        select:focus,
+        input[type="text"]:focus,
+        textarea:focus {
+            outline: none;
+            border-color: rgba(180, 72, 36, 0.48);
+            box-shadow: 0 0 0 4px rgba(180, 72, 36, 0.10);
         }
         textarea {
             min-height: 220px;
@@ -743,15 +805,22 @@ for($i = 0; $i < 7; $i++) {
         }
         .callout {
             border: 1px solid var(--line);
-            background: #f8f2e8;
+            background: linear-gradient(180deg, #fcf5eb, #f7efe2);
             padding: 14px;
             margin-top: 14px;
+            border-radius: 14px;
         }
         .subnav {
             display: flex;
             flex-wrap: wrap;
             gap: 8px;
             margin-top: 10px;
+        }
+        .subnav a {
+            padding: 7px 10px;
+            background: rgba(255,255,255,0.65);
+            border: 1px solid var(--line);
+            border-radius: 999px;
         }
         .codebox {
             white-space: pre-wrap;
@@ -762,6 +831,59 @@ for($i = 0; $i < 7; $i++) {
             flex-wrap: wrap;
             gap: 10px;
             margin-top: 14px;
+        }
+        .section-note {
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+        .health-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 12px;
+            background: var(--chip);
+            border: 1px solid var(--line);
+            font-size: 0.84rem;
+            color: var(--accent-deep);
+            border-radius: 999px;
+        }
+        .health-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #c69060;
+            box-shadow: 0 0 0 3px rgba(198, 144, 96, 0.18);
+        }
+        .health-dot.good {
+            background: #2f8a58;
+            box-shadow: 0 0 0 3px rgba(47, 138, 88, 0.18);
+        }
+        .policy-grid {
+            display: grid;
+            gap: 14px;
+            grid-template-columns: 1fr 1fr;
+        }
+        .policy-card {
+            padding: 14px;
+            background: var(--panel-strong);
+            border: 1px solid var(--line);
+            border-radius: 14px;
+        }
+        .policy-card .eyebrow {
+            color: var(--muted);
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            font-size: 0.78rem;
+            margin-bottom: 8px;
+            display: block;
+        }
+        .policy-card .main {
+            font-size: 1.18rem;
+            font-weight: 700;
+            margin-bottom: 8px;
         }
         @media (max-width: 920px) {
             .hero,
@@ -781,7 +903,8 @@ for($i = 0; $i < 7; $i++) {
             }
             .summary-grid,
             .twc-stats,
-            .field-grid {
+            .field-grid,
+            .policy-grid {
                 grid-template-columns: 1fr;
             }
             .hero-actions {
@@ -794,6 +917,7 @@ for($i = 0; $i < 7; $i++) {
 <div class="wrap">
     <div class="hero">
         <div>
+            <span class="hero-kicker">Gen2 Wall Connector Control</span>
             <h1>TWCManager</h1>
             <p>Control Tesla Wall Connector Gen2 charging, review live RS-485 status, and adjust schedules and green-energy policy from one page.</p>
         </div>
@@ -923,8 +1047,16 @@ for($i = 0; $i < 7; $i++) {
     <?php endif; ?>
 
     <div class="panel">
-        <h2>Live Status</h2>
-        <p class="muted">Current charger state from the running TWCManager process.</p>
+        <div class="section-note">
+            <div>
+                <h2>Live Status</h2>
+                <p class="muted">Current charger state from the running TWCManager process. This page refreshes automatically every 10 seconds.</p>
+            </div>
+            <div class="health-badge">
+                <span class="health-dot <?=($status['valid'] ? 'good' : '')?>"></span>
+                <?=($status['valid'] ? 'Backend reachable' : 'Backend unavailable')?>
+            </div>
+        </div>
         <div class="summary-grid">
             <div class="metric">
                 <span class="label">Power Available</span>
@@ -956,7 +1088,13 @@ for($i = 0; $i < 7; $i++) {
     <div class="grid">
         <div>
             <div class="panel">
-                <h2>Managed Wall Connectors</h2>
+                <div class="section-note">
+                    <div>
+                        <h2>Managed Wall Connectors</h2>
+                        <p class="muted">Per-charger telemetry from the RS-485 heartbeat stream.</p>
+                    </div>
+                    <div class="health-badge"><?=count($status['twcs'])?> detected</div>
+                </div>
                 <?php if(count($status['twcs']) === 0): ?>
                 <p class="muted">No slave TWCs were reported on the RS-485 network.</p>
                 <?php else: ?>
@@ -996,24 +1134,25 @@ for($i = 0; $i < 7; $i++) {
         <div>
             <div class="panel">
                 <h2>Charging Policy</h2>
-                <div class="field-grid">
-                    <div class="field">
-                        <label>Scheduled Power</label>
-                        <div class="callout">
-                            <strong><?=($status['scheduled_amps'] === '-1' ? 'Disabled' : h($status['scheduled_amps']) . 'A')?></strong><br>
+                <div class="policy-grid">
+                    <div class="policy-card">
+                        <span class="eyebrow">Scheduled Power</span>
+                        <div class="main"><?=($status['scheduled_amps'] === '-1' ? 'Disabled' : h($status['scheduled_amps']) . 'A')?></div>
+                        <div class="muted">
                             <?=h(format_time_label($status['scheduled_start']))?> to <?=h(format_time_label($status['scheduled_end']))?><br>
                             <?=h(format_day_bitmap($status['scheduled_days_bitmap']))?>
                         </div>
                     </div>
-                    <div class="field">
-                        <label>Non-Scheduled Power</label>
-                        <div class="callout">
+                    <div class="policy-card">
+                        <span class="eyebrow">Non-Scheduled Power</span>
+                        <div class="main">
                             <?php if($status['non_scheduled_amps'] === '-1'): ?>
-                            <strong>Track green energy</strong>
+                            Track green energy
                             <?php else: ?>
-                            <strong><?=h($status['non_scheduled_amps'])?>A</strong>
+                            <?=h($status['non_scheduled_amps'])?>A
                             <?php endif; ?>
-                            <br>
+                        </div>
+                        <div class="muted">
                             Resume green energy at <?=h(format_time_label($status['resume_track_green_energy_time']))?>
                         </div>
                     </div>
@@ -1111,6 +1250,9 @@ function toggleScheduleFields() {
 
 toggleResumeField();
 toggleScheduleFields();
+setTimeout(function() {
+    window.location.reload();
+}, 10000);
 </script>
 </body>
 </html>
