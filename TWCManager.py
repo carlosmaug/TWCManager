@@ -678,10 +678,11 @@ class BackgroundTaskRunner:
             # a charge starts or we determine the car is done charging. To avoid
             # wasting memory queueing up a bunch of these tasks when we're
             # handling a charge cmd already, don't queue two of the same task.
-            return
+            return False
 
         self.cmds[task['cmd']] = True
         self.queue.put(task)
+        return True
 
     def run_forever(self):
         while True:
@@ -1620,9 +1621,9 @@ def car_api_charge(charge):
 
 def queue_background_task(task):
     if(background_task_runner == None):
-        return
+        return False
 
-    background_task_runner.queue_task(task)
+    return background_task_runner.queue_task(task)
 
 
 def background_tasks_thread():
@@ -2238,17 +2239,19 @@ class TWCSlave:
                 # charging, I'm not sure if this would prevent it from charging
                 # when next plugged in.
                 if(self.task_runner != None):
-                    if (debug_level >= 1):
+                    if (debug_level >= 1
+                        and self.task_runner.queue_task({'cmd':'charge', 'charge':False})
+                    ):
                         print(time_now() + ': TWC %02X%02X queue Tesla API stop charge because car is drawing '
                               '%.2fA while offered amps is 0.' %
                               (self.TWCID[0], self.TWCID[1], self.reportedAmpsActual))
-                    self.task_runner.queue_task({'cmd':'charge', 'charge':False})
                 else:
-                    if (debug_level >= 1):
+                    if (debug_level >= 1
+                        and queue_background_task({'cmd':'charge', 'charge':False})
+                    ):
                         print(time_now() + ': TWC %02X%02X queue Tesla API stop charge because car is drawing '
                               '%.2fA while offered amps is 0.' %
                               (self.TWCID[0], self.TWCID[1], self.reportedAmpsActual))
-                    queue_background_task({'cmd':'charge', 'charge':False})
             elif(self.lastAmpsOffered >= 5.0 and self.reportedAmpsActual < 2.0
                  and self.reportedState != 0x02
             ):
@@ -2256,17 +2259,19 @@ class TWCSlave:
                 # try starting charge via car api.
                 self.autoStartChargeRequested = True
                 if(self.task_runner != None):
-                    if (debug_level >= 1):
+                    if (debug_level >= 1
+                        and self.task_runner.queue_task({'cmd':'charge', 'charge':True})
+                    ):
                         print(time_now() + ': TWC %02X%02X queue Tesla API start charge because vehicle is present '
                               'but drawing only %.2fA with %.2fA offered.' %
                               (self.TWCID[0], self.TWCID[1], self.reportedAmpsActual, self.lastAmpsOffered))
-                    self.task_runner.queue_task({'cmd':'charge', 'charge':True})
                 else:
-                    if (debug_level >= 1):
+                    if (debug_level >= 1
+                        and queue_background_task({'cmd':'charge', 'charge':True})
+                    ):
                         print(time_now() + ': TWC %02X%02X queue Tesla API start charge because vehicle is present '
                               'but drawing only %.2fA with %.2fA offered.' %
                               (self.TWCID[0], self.TWCID[1], self.reportedAmpsActual, self.lastAmpsOffered))
-                    queue_background_task({'cmd':'charge', 'charge':True})
             elif(self.reportedAmpsActual > 4.0):
                 # At least one plugged in car is successfully charging. We don't
                 # know which car it is, so we must set
@@ -2790,17 +2795,19 @@ class TWCSlave:
         #   S 032e 0.25/0.00A: 03 0000 0019 0000 M: 05 0000 0000 0000
         if(self.autoStartChargeRequested and desiredAmpsOffered == 0):
             if(self.task_runner != None):
-                if (debug_level >= 1):
+                if (debug_level >= 1
+                    and self.task_runner.queue_task({'cmd':'charge', 'charge':False})
+                ):
                     print(time_now() + ': TWC %02X%02X queue Tesla API stop charge because '
                           'auto-started charging no longer has enough available power.' %
                           (self.TWCID[0], self.TWCID[1]))
-                self.task_runner.queue_task({'cmd':'charge', 'charge':False})
             else:
-                if (debug_level >= 1):
+                if (debug_level >= 1
+                    and queue_background_task({'cmd':'charge', 'charge':False})
+                ):
                     print(time_now() + ': TWC %02X%02X queue Tesla API stop charge because '
                           'auto-started charging no longer has enough available power.' %
                           (self.TWCID[0], self.TWCID[1]))
-                queue_background_task({'cmd':'charge', 'charge':False})
 
         if(self.reportedAmpsMax != desiredAmpsOffered
            or desiredAmpsOffered == 0
