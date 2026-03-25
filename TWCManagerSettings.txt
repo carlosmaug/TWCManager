@@ -1,0 +1,169 @@
+# TWCManager settings
+#
+# Format:
+#   key=value
+# Blank lines and lines beginning with # are ignored.
+#
+# Serial device for the RS-485 adapter connected to the Tesla Wall Connector bus.
+# Typical values:
+#   /dev/ttyUSB0    USB-RS485 adapter
+#   /dev/ttyUSB1    if more than one USB serial adapter is connected
+#   /dev/serial0    onboard UART / HAT / GPIO serial adapter
+rs485Adapter=/dev/ttyUSB0
+
+# RS-485 bus speed in bauds.
+# Tesla Gen2 Wall Connector uses 9600. Do not change it unless your hardware
+# really uses a different speed.
+# Example: 9600
+baud=9600
+
+# Maximum continuous current available for all Wall Connectors combined.
+# This is the installation-wide limit that TWCManager will never intentionally
+# exceed.
+# Set this to the safe continuous current of the upstream breaker and wiring,
+# not the breaker nameplate rating. A common rule is breaker_rating * 0.8 for
+# continuous loads.
+# If this value is too high you may trip the breaker, overload wiring, or
+# create a real electrical hazard.
+# Examples:
+#   32  -> 40A breaker at 80%
+#   24  -> 30A breaker at 80%
+#   80  -> 100A breaker at 80%
+wiringMaxAmpsAllTWCs=32
+
+# Maximum continuous current that a single Wall Connector may use.
+# If all chargers share one breaker, this is usually the same as
+# wiringMaxAmpsAllTWCs.
+# If each TWC is on its own branch circuit, set this to the safe continuous
+# limit of one branch and set wiringMaxAmpsAllTWCs to the sum of all branches.
+# Example:
+#   Two chargers on separate 40A continuous branches:
+#   wiringMaxAmpsPerTWC=40
+wiringMaxAmpsPerTWC=32
+
+# Minimum current that TWCManager should normally offer to a car.
+# Lower values allow charging with less surplus energy, but can be inefficient.
+# Very low current can waste energy or produce unstable start/stop behavior on
+# some installations. Use this as a policy threshold, not as the hardware
+# minimum.
+# Examples:
+#   6   -> common technical minimum
+#   12  -> more efficient on many single-phase installations
+minAmpsPerTWC=1
+
+# Minimum current the Wall Connector hardware/protocol supports.
+# Normally leave this at the real hardware minimum and use minAmpsPerTWC for
+# policy decisions.
+# In most cases this should reflect the real charger/protocol floor and should
+# not be used as the main tuning knob.
+# Example: 6
+minAmpsTWCSupports=1
+
+# Offset applied to surplus-solar current calculation.
+# Use a negative value to reserve current for the rest of the house, or a
+# positive value to make charging start earlier.
+# Examples:
+#   -3   -> reserve about 3A for household base load
+#    0   -> use only measured surplus as-is
+greenEnergyAmpsOffset=-3
+
+# Log verbosity.
+# Common values:
+#   0  -> only errors
+#   1  -> useful operational logs
+#   2  -> normal debugging
+#   9  -> includes raw RS-485 frames
+debugLevel=2
+
+# Whether log timestamps include milliseconds.
+# Allowed values: true, false
+# Example: true
+displayMilliseconds=false
+
+# Operating mode on the RS-485 bus.
+# Values:
+#   1 -> emulate a master Wall Connector and control slaves
+#   0 -> emulate a slave
+#   2 -> listen/debug mode, does not manage charging normally
+fakeMaster=1
+
+# Emulated local TWC identifier, in hexadecimal, 2 bytes.
+# Use 4 hex digits.
+# Example: 7777
+fakeTWCID=7777
+
+# Sign bytes used in linkready/heartbeat frames, in hexadecimal, 1 byte each.
+# Normally you should not change them.
+# Example: 77
+masterSign=77
+slaveSign=77
+
+# If there are several Tesla vehicles in the account, only send API commands
+# to vehicles detected at home.
+# This reduces the chance of accidentally starting or stopping a Tesla that is
+# plugged in somewhere else. If home detection is wrong because vehicle
+# location is stale or inaccurate, you may prefer to disable it.
+# Allowed values: true, false
+# Example: true
+onlyChargeMultiCarsAtHome=true
+
+# Maximum charge current outside the scheduled charging window.
+# Use -1 to disable this limit and let other rules decide.
+# Examples:
+#   -1  -> no extra limit outside schedule
+#   16  -> cap charging at 16A outside schedule
+nonScheduledAmpsMax=-1
+
+# Maximum charge current during the scheduled window.
+# Use -1 to disable scheduled charging.
+# Example:
+#   scheduledAmpsMax=25
+scheduledAmpsMax=25
+
+# Scheduled window start hour in local time, using decimal hours.
+# Examples:
+#   0.0   -> 00:00
+#   0.5   -> 00:30
+#   1.5   -> 01:30
+#   23.75 -> 23:45
+scheduledAmpsStartHour=0.9
+
+# Scheduled window end hour in local time, using decimal hours.
+# If end is lower than start, the schedule crosses midnight.
+# Example:
+#   start=23.0 and end=7.0 means 23:00 to 07:00
+scheduledAmpsEndHour=7.0
+
+# Scheduled charging days bitmap.
+# Bits:
+#   bit0=Monday, bit1=Tuesday, ... bit6=Sunday
+# Examples:
+#   127 -> every day
+#   31  -> Monday to Friday
+#   96  -> Saturday and Sunday
+scheduledAmpsDaysBitmap=127
+
+# Automatically resume green-energy tracking at this local hour.
+# Use -1 to disable the automatic resume feature.
+# Examples:
+#   -1   -> disabled
+#   8.0  -> resume at 08:00 every day
+hourResumeTrackGreenEnergy=-1.0
+
+# Accumulated delivered energy counter in kWh.
+# This is persistent state, not a tuning parameter. TWCManager updates it over
+# time so the value survives restarts.
+# Example: 119.0
+kWhDelivered=119.0
+
+# Home latitude used to decide whether a vehicle is considered "at home".
+# It is mainly used when onlyChargeMultiCarsAtHome=true.
+# Example for Madrid area: 40.488275
+homeLat=40.488275
+
+# Home longitude used to decide whether a vehicle is considered "at home".
+# Example for Madrid area: -3.666271
+homeLon=-3.666271
+
+# Tesla API tokens are intentionally not stored in this file.
+# Use TeslaApiTokens.json or TESLA_API_* environment variables for secrets.
