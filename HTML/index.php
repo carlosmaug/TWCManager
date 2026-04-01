@@ -376,6 +376,12 @@
             gap: 12px;
             align-items: center;
             margin-bottom: 12px;
+            flex-wrap: wrap;
+        }
+        .status-badges {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
         }
         .health-badge {
             display: inline-flex;
@@ -458,9 +464,9 @@
             gap: 6px;
         }
         .legend-swatch {
-            width: 14px;
-            height: 3px;
-            border-radius: 999px;
+            width: 12px;
+            height: 12px;
+            border-radius: 3px;
             display: inline-block;
         }
         .legend-swatch.solar {
@@ -474,29 +480,38 @@
             height: 210px;
             display: block;
         }
+        .chart-empty {
+            min-height: 210px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            color: var(--muted);
+            border: 1px dashed rgba(137, 111, 86, 0.28);
+            background: rgba(255, 255, 255, 0.42);
+            padding: 18px;
+        }
         .chart-grid-line {
             stroke: rgba(97, 113, 123, 0.22);
             stroke-width: 1;
+        }
+        .chart-axis-base {
+            stroke: rgba(24, 49, 60, 0.28);
+            stroke-width: 1.2;
         }
         .chart-axis-label {
             fill: #6a7881;
             font-size: 10px;
         }
-        .chart-line {
-            fill: none;
-            stroke-width: 3;
-            stroke-linecap: round;
-            stroke-linejoin: round;
-        }
-        .chart-line.solar,
-        .chart-point.solar {
-            stroke: #2f8a58;
+        .chart-bar.solar {
             fill: #2f8a58;
+            stroke: rgba(255, 255, 255, 0.72);
+            stroke-width: 0.8;
         }
-        .chart-line.grid,
-        .chart-point.grid {
-            stroke: #b44824;
+        .chart-bar.grid {
             fill: #b44824;
+            stroke: rgba(255, 255, 255, 0.72);
+            stroke-width: 0.8;
         }
         @media (max-width: 920px) {
             .hero,
@@ -672,11 +687,18 @@
                 <h2>Live Status</h2>
                 <p class="muted">Current charger state from the running TWCManager process. This page refreshes automatically every 10 seconds.</p>
             </div>
-            <div class="health-badge">
-                <span class="health-dot <?=h($backendBadgeClass)?>"></span>
-                <?=h($backendBadgeText)?>
+            <div class="status-badges">
+                <div class="health-badge">
+                    <span class="health-dot <?=h($backendBadgeClass)?>"></span>
+                    <?=h($backendBadgeText)?>
+                </div>
+                <div class="health-badge">
+                    <span class="health-dot <?=h($teslaConnectionClass)?>"></span>
+                    <?=h($teslaConnectionText)?>
+                </div>
             </div>
         </div>
+        <p class="muted"><?=h($teslaConnectionDetail)?></p>
         <div class="summary-grid">
             <?php render_metric('Power Available', $availableAmpsDisplay); ?>
             <?php render_metric('Wiring Limit', $wiringLimitDisplay); ?>

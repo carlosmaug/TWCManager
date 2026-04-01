@@ -29,6 +29,20 @@ function request_present($key)
     return array_key_exists($key, $request);
 }
 
+function first_readable_file($paths)
+{
+    foreach($paths as $path) {
+        if(!is_string($path) || $path === '') {
+            continue;
+        }
+        if(is_file($path) && is_readable($path)) {
+            return $path;
+        }
+    }
+
+    return '';
+}
+
 function page_url($params = array())
 {
     return 'index.php' . ($params ? '?' . http_build_query($params) : '');
@@ -720,24 +734,10 @@ function render_energy_line_chart($title, $subtitle, $chart)
     $plotWidth = $width - $paddingLeft - $paddingRight;
     $plotHeight = $height - $paddingTop - $paddingBottom;
     $maxValue = 0.0;
+    $totalValue = 0.0;
     for($i = 0; $i < $count; $i++) {
         $maxValue = max($maxValue, (float)$solar[$i], (float)$grid[$i]);
-    }
-    if($maxValue <= 0) {
-        $maxValue = 1.0;
-    }
-
-    $solarPoints = array();
-    $gridPoints = array();
-    $ticks = array(0, $maxValue / 2, $maxValue);
-    for($i = 0; $i < $count; $i++) {
-        $x = ($count === 1)
-            ? ($paddingLeft + ($plotWidth / 2))
-            : ($paddingLeft + (($plotWidth * $i) / ($count - 1)));
-        $solarY = $paddingTop + $plotHeight - (((float)$solar[$i] / $maxValue) * $plotHeight);
-        $gridY = $paddingTop + $plotHeight - (((float)$grid[$i] / $maxValue) * $plotHeight);
-        $solarPoints[] = array($x, $solarY);
-        $gridPoints[] = array($x, $gridY);
+        $totalValue += max(0, (float)$solar[$i]) + max(0, (float)$grid[$i]);
     }
 
     ?>
@@ -752,27 +752,62 @@ function render_energy_line_chart($title, $subtitle, $chart)
                 <span class="legend-item"><span class="legend-swatch grid"></span>Grid</span>
             </div>
         </div>
+        <?php if($totalValue <= 0): ?>
+        <div class="chart-empty">No hourly energy recorded yet for this period.</div>
+        <?php else: ?>
+        <?php
+        $ticks = array(0, $maxValue / 2, $maxValue);
+        $groupWidth = $plotWidth / max($count, 1);
+        $innerGroupWidth = min(44, max(12, $groupWidth * 0.9));
+        $barGap = min(6, max(2, $innerGroupWidth * 0.08));
+        $barWidth = max(8, ($innerGroupWidth - $barGap) / 2);
+        $labelStep = max(1, (int)ceil($count / 8));
+        ?>
         <svg class="line-chart" viewBox="0 0 <?=$width?> <?=$height?>" preserveAspectRatio="none" aria-hidden="true">
             <?php foreach($ticks as $tick): ?>
             <?php $y = $paddingTop + $plotHeight - (($tick / $maxValue) * $plotHeight); ?>
             <line x1="<?=$paddingLeft?>" y1="<?=round($y, 2)?>" x2="<?=$width - $paddingRight?>" y2="<?=round($y, 2)?>" class="chart-grid-line"></line>
             <text x="<?=$paddingLeft?>" y="<?=round($y - 4, 2)?>" class="chart-axis-label"><?=h(number_format($tick, 1))?></text>
             <?php endforeach; ?>
-            <path d="<?=h(build_svg_line_path($solarPoints))?>" class="chart-line solar"></path>
-            <path d="<?=h(build_svg_line_path($gridPoints))?>" class="chart-line grid"></path>
-            <?php foreach($solarPoints as $idx => $point): ?>
-            <circle cx="<?=round($point[0], 2)?>" cy="<?=round($point[1], 2)?>" r="3.5" class="chart-point solar"></circle>
-            <circle cx="<?=round($gridPoints[$idx][0], 2)?>" cy="<?=round($gridPoints[$idx][1], 2)?>" r="3.5" class="chart-point grid"></circle>
-            <?php endforeach; ?>
+            <line x1="<?=$paddingLeft?>" y1="<?=$paddingTop + $plotHeight?>" x2="<?=$width - $paddingRight?>" y2="<?=$paddingTop + $plotHeight?>" class="chart-axis-base"></line>
             <?php foreach($labels as $idx => $label): ?>
             <?php
-            $x = ($count === 1)
-                ? ($paddingLeft + ($plotWidth / 2))
-                : ($paddingLeft + (($plotWidth * $idx) / ($count - 1)));
+            $groupX = $paddingLeft + ($groupWidth * $idx);
+            $barStartX = $groupX + (($groupWidth - (($barWidth * 2) + $barGap)) / 2);
+            $solarHeight = (((float)$solar[$idx] / $maxValue) * $plotHeight);
+            $gridHeight = (((float)$grid[$idx] / $maxValue) * $plotHeight);
+            if((float)$solar[$idx] > 0 && $solarHeight < 4) {
+                $solarHeight = 4;
+            }
+            if((float)$grid[$idx] > 0 && $gridHeight < 4) {
+                $gridHeight = 4;
+            }
+            $solarY = $paddingTop + $plotHeight - $solarHeight;
+            $gridY = $paddingTop + $plotHeight - $gridHeight;
+            $labelX = $groupX + ($groupWidth / 2);
             ?>
-            <text x="<?=round($x, 2)?>" y="<?=$height - 8?>" text-anchor="middle" class="chart-axis-label"><?=h($label)?></text>
+            <rect
+                x="<?=round($barStartX, 2)?>"
+                y="<?=round($solarY, 2)?>"
+                width="<?=round($barWidth, 2)?>"
+                height="<?=round($solarHeight, 2)?>"
+                rx="3"
+                class="chart-bar solar"
+            ></rect>
+            <rect
+                x="<?=round($barStartX + $barWidth + $barGap, 2)?>"
+                y="<?=round($gridY, 2)?>"
+                width="<?=round($barWidth, 2)?>"
+                height="<?=round($gridHeight, 2)?>"
+                rx="3"
+                class="chart-bar grid"
+            ></rect>
+            <?php if($idx % $labelStep === 0 || $idx === $count - 1): ?>
+            <text x="<?=round($labelX, 2)?>" y="<?=$height - 8?>" text-anchor="middle" class="chart-axis-label"><?=h($label)?></text>
+            <?php endif; ?>
             <?php endforeach; ?>
         </svg>
+        <?php endif; ?>
     </div>
     <?php
 }

@@ -238,3 +238,42 @@ $chargeNowActive = ((float)$status['charge_now_amps'] > 0);
 $chargeNowRemainingDisplay = format_duration_compact($status['charge_now_remaining_seconds']);
 $chargeNowButtonLabel = '1-day charge, ' . amp_display($status['wiring_max_amps'], 0);
 $totalDeliveredDisplay = number_format($status['kwh_delivered'], 2) . ' kWh';
+
+$teslaOAuthConfigCandidates = array();
+$teslaOAuthConfigEnv = getenv('TESLA_OAUTH_CONFIG_FILE');
+if(is_string($teslaOAuthConfigEnv) && trim($teslaOAuthConfigEnv) !== '') {
+    $teslaOAuthConfigCandidates[] = trim($teslaOAuthConfigEnv);
+}
+$teslaOAuthConfigCandidates[] = dirname(__DIR__) . '/tesla_oauth_config.json';
+$teslaOAuthConfigCandidates[] = dirname(dirname(__DIR__)) . '/tesla_oauth_config.json';
+$teslaOAuthConfigPath = first_readable_file($teslaOAuthConfigCandidates);
+$teslaConfigAvailable = ($teslaOAuthConfigPath !== '');
+
+$teslaTokenCandidates = array(
+    rtrim($twcScriptDir, '/\\') . '/TeslaApiTokens.json',
+    dirname(__DIR__) . '/TeslaApiTokens.json',
+    dirname(dirname(__DIR__)) . '/TeslaApiTokens.json',
+);
+$teslaTokenPath = first_readable_file($teslaTokenCandidates);
+$teslaTokensAvailable = ($teslaTokenPath !== '');
+
+if($status['need_tesla_tokens']) {
+    $teslaConnectionClass = '';
+    $teslaConnectionText = 'Tesla disconnected';
+    $teslaConnectionDetail = 'The backend reports that Tesla API access is needed, but no usable tokens are loaded.';
+}
+elseif($teslaTokensAvailable) {
+    $teslaConnectionClass = 'good';
+    $teslaConnectionText = 'Tesla connected';
+    $teslaConnectionDetail = 'A readable TeslaApiTokens.json file is present for TWCManager.';
+}
+elseif($teslaConfigAvailable) {
+    $teslaConnectionClass = '';
+    $teslaConnectionText = 'Tesla not connected';
+    $teslaConnectionDetail = 'OAuth is configured, but no readable TeslaApiTokens.json file was found yet.';
+}
+else {
+    $teslaConnectionClass = '';
+    $teslaConnectionText = 'Tesla not configured';
+    $teslaConnectionDetail = 'No OAuth helper configuration or Tesla token file was found on this host.';
+}
