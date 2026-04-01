@@ -1,117 +1,165 @@
 #! /usr/bin/python3
 
-"""Tesla Wall Connector load manager with optional Tesla Fleet/Owner API support.
+"""Tesla Wall Connector manager and protocol emulator.
 
-This program behaves as a Tesla Wall Connector master on the RS-485 bus and
-manages one or more slave chargers. Its main loop listens for charger
-heartbeats, tracks charger state, calculates the current budget available for
-charging, and sends updated current limits back to each charger.
+This module acts primarily as a fake Tesla Wall Connector (TWC) master that
+speaks the legacy RS-485 load-sharing protocol used by Tesla Wall Connectors.
+Its main responsibility is to discover slave chargers, negotiate the charging
+current offered to each one, and continuously exchange heartbeat frames so the
+chargers keep accepting power commands.
 
-At the protocol level it emulates the behavior expected from a master Wall
-Connector so that real slave units continue to exchange heartbeat frames and
-accept revised current limits. In practice that means the application is both a
-charger coordinator and a policy engine: it decides when charging should be
-allowed, how many amps may be offered, and when a vehicle-side Tesla API action
-is needed because charger-side current control alone is not sufficient.
-
-Current can be limited from several sources:
-
-* fixed wiring limits for one charger or the whole installation
-* scheduled charging windows
-* a temporary ``charge now`` override
-* dynamic solar/green-energy telemetry
-
-That makes the application useful as a home charging coordinator: it can track
-surplus solar generation, keep the installation inside wiring limits, apply
-time-based charging policy, and reduce or stop charging when external
-conditions change. It does not obtain battery state directly from the Wall
-Connector protocol, so vehicle-side state may still require Tesla API access.
-
-When charger-level current control is not enough, the program can also use the
-Tesla API to wake vehicles and request ``charge_start`` or ``charge_stop``.
-That path is used, for example, when a vehicle should begin charging after
-power becomes available or when an automatically-started charge must stop again
-because available solar power has fallen away.
-
-Authentication is not performed interactively here. Tesla access and refresh
-tokens are expected to exist already, typically in ``TeslaApiTokens.json``,
-while mutable runtime settings are persisted in ``TWCManagerSettings.txt``.
-
-Origin, support and license
-===========================
-
-The original code and TWC protocol reverse engineering are by Chris Dragon,
-with additional logs and hints from Teslamotorsclub.com users TheNoOne,
-IanAmber and twc.
-
-This codebase has also been substantially updated and extended by Carlos Martin
-Ugalde (GitHub: ``carlosmaug``), including major modernization work, web-based
-Tesla token tooling, documentation improvements, code cleanup, and broader
-maintenance updates beyond the original single-script baseline.
-
-Project discussion:
-``https://teslamotorsclub.com/tmc/threads/new-wall-connector-load-sharing-protocol.72830``
-
-Issue tracker:
-``https://github.com/cdragon/TWCManager/issues``
-
-This software is released under the Unlicense:
-``http://unlicense.org``
-
-Main subsystems
-===============
-
-* ``GeneralConfig``, ``EnergyConfig`` and ``TeslaApiConfig`` hold the runtime
-  configuration loaded from settings.
-* ``RuntimeState`` contains mutable charger-control state shared across the
-  polling loop.
-* ``TWCSlave`` implements per-charger state tracking, heartbeat handling and
-  charge-current decisions.
-* ``TeslaCarApi`` wraps the Tesla HTTP API for token refresh, wake-up and
-  charge start/stop requests.
-* ``BackgroundTaskRunner`` serializes slower side effects such as Tesla API
-  calls and green-energy refreshes away from the RS-485 loop.
-* ``TWCManagerApp.run()`` wires everything together and drives the process.
-
-Protocol overview
+Operational model
 =================
+The script is long because it combines several concerns in a single executable
+module:
 
-Slave Wall Connectors periodically announce themselves with linkready frames.
-Once discovered, the master exchanges heartbeat frames with each slave about
-once per second. Those heartbeats carry the charger state, the current the car
-is actually drawing, and the current limit being requested or offered. This is
-the core feedback loop that lets TWCManager decide whether to raise, lower or
-remove charging current on each cycle.
+* Static configuration for charger wiring limits, RS-485 transport and Tesla
+  API behaviour.
+* Persistence of runtime-adjustable settings in ``TWCManagerSettings.txt``.
+* Optional Tesla Owner API integration to wake vehicles and start/stop
+  charging when protocol-level current limits alone are not sufficient.
+* Optional green-energy tracking that converts solar production into an
+  available current budget.
+* A SysV IPC bridge used by the accompanying web interface.
+* A main event loop that reads RS-485 frames, decodes them and updates charger
+  state.
 
-Maintenance notes
-=================
+Reading guide
+=============
+When revisiting this file, the most useful entry points are:
 
-This file is still intentionally close to the original single-script design.
-Dataclasses and helper classes now exist, but they still coexist with legacy
-module-level globals and helper functions. Changes should preserve both object
-state and legacy global state where the code still depends on both.
+* ``GeneralConfig``, ``EnergyConfig`` and related dataclasses for the runtime
+  knobs grouped by concern.
+* ``RuntimeState`` for mutable protocol state that changes while the process is
+  running.
+* ``TWCSlave`` for per-charger state and current-allocation decisions.
+* ``TeslaCarApi`` for vehicle wake/start/stop logic.
+* ``TWCManagerApp.run()`` for the orchestration loop that ties IPC, background
+  work and RS-485 frame handling together.
 
+Design constraints
+==================
+This codebase is partly modernized but still intentionally preserves the
+original script structure. That means dataclasses and small wrapper classes now
+coexist with legacy module-level globals. Many helper functions still read or
+mutate those globals, so changes should be made carefully: if you move logic
+into objects, verify both the object state and the legacy globals remain
+consistent.
+
+Protocol notes
+==============
 The TWC protocol is binary and timing-sensitive. Heartbeats are exchanged about
-once per second, linkready frames drive charger discovery, and some frame types
-are intentionally blocked because they may crash or permanently disable a
-charger. Any change to heartbeat timing, offered-current logic or protocol
-framing should be validated against real hardware assumptions before deployment.
-
-Disclaimer
-==========
-
-Misuse of the protocol implemented here can cause a charger to offer more
-current than the wiring or protection devices were designed to handle. That may
-trip a breaker and, in a fault scenario, could create equipment damage or fire
-risk. This software was not produced with internal Tesla design information,
-and unforeseen interactions could affect a vehicle, a Wall Connector or the
-installation around it.
-
-The software is provided "as is", without warranty of any kind, express or
-implied, including but not limited to merchantability, fitness for a particular
-purpose and noninfringement. Use it only if you understand the electrical and
-operational risks and are prepared to accept full responsibility for them.
+once per second, linkready frames are used during discovery, and some frame
+types are intentionally blocked because they may crash or permanently disable a
+charger. Any modification in message composition, timing or current-allocation
+rules should be validated against real hardware assumptions before deployment.
 """
+
+################################################################################
+# Code and TWC protocol reverse engineering by Chris Dragon.
+#
+# Additional logs and hints provided by Teslamotorsclub.com users:
+#   TheNoOne, IanAmber, and twc.
+# Thank you!
+#
+# For support and information, please read through this thread:
+# https://teslamotorsclub.com/tmc/threads/new-wall-connector-load-sharing-protocol.72830
+#
+# Report bugs at https://github.com/cdragon/TWCManager/issues
+#
+# This software is released under the "Unlicense" model: http://unlicense.org
+# This means source code and TWC protocol knowledge are released to the general
+# public free for personal or commercial use. I hope the knowledge will be used
+# to increase the use of green energy sources by controlling the time and power
+# level of car charging.
+#
+# WARNING:
+# Misuse of the protocol described in this software can direct a Tesla Wall
+# Charger to supply more current to a car than the charger wiring was designed
+# for. This will trip a circuit breaker or may start a fire in the unlikely
+# event that the circuit breaker fails.
+# This software was not written or designed with the benefit of information from
+# Tesla and there is always a small possibility that some unforeseen aspect of
+# its operation could damage a Tesla vehicle or a Tesla Wall Charger. All
+# efforts have been made to avoid such damage and this software is in active use
+# on the author's own vehicle and TWC.
+#
+# In short, USE THIS SOFTWARE AT YOUR OWN RISK.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+# ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+# WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+#
+# For more information, please visit http://unlicense.org
+
+################################################################################
+# What's TWCManager good for?
+#
+# This script (TWCManager) pretends to be a Tesla Wall Charger (TWC) set to
+# master mode. When wired to the IN or OUT pins of real TWC units set to slave
+# mode (rotary switch position F), TWCManager can tell them to limit car
+# charging to any whole amp value between 5A and the max rating of the charger.
+# Charging can also be stopped so the car goes to sleep.
+#
+# This level of control is useful for having TWCManager track the real-time
+# availability of green energy sources and direct the slave TWCs to use near the
+# exact amount of energy available. This saves energy compared to sending the
+# green energy off to a battery for later car charging or off to the grid where
+# some of it is lost in transmission.
+#
+# TWCManager can also be set up to only allow charging during certain hours,
+# stop charging if a grid overload or "save power day" is detected, reduce
+# charging on one TWC when a "more important" one is plugged in, or whatever
+# else you might want to do.
+#
+# One thing TWCManager does not have direct access to is the battery charge
+# percentage of each plugged-in car. There are hints on forums that some TWCs
+# do report battery state, but we have yet to see a TWC send such a message.
+# It's possible the feature exists in TWCs with newer firmware.
+# This is unfortunate, but if you own a Tesla vehicle being charged, people have
+# figured out how to get its charge state by contacting Tesla's servers through
+# Tesla's authenticated APIs. Modern Tesla authentication is MFA-based, so this
+# script now expects pre-generated API tokens instead of handling interactive
+# login directly.
+
+################################################################################
+# Overview of protocol TWCs use to load share
+#
+# A TWC set to slave mode (rotary switch position F) sends a linkready message
+# every 10 seconds.
+# The message contains a unique 4-byte id that identifies that particular slave
+# as the sender of the message.
+#
+# A TWC set to master mode sees a linkready message. In response, it sends a
+# heartbeat message containing the slave's 4-byte id as the intended recipient
+# of the message.
+# The master's 4-byte id is included as the sender of the message.
+#
+# Slave sees a heartbeat message from master directed to its unique 4-byte id
+# and responds with its own heartbeat message containing the master's 4-byte id
+# as the intended recipient of the message.
+# The slave's 4-byte id is included as the sender of the message.
+#
+# Master sends a heartbeat to a slave around once per second and expects a
+# response heartbeat from the slave.
+# Slaves do not send heartbeats without seeing one from a master first. If
+# heartbeats stop coming from master, slave resumes sending linkready every 10
+# seconds.
+# If slaves stop replying to heartbeats from master, master stops sending
+# heartbeats after about 26 seconds.
+#
+# Heartbeat messages contain a data block used to negotiate the amount of power
+# available to each slave and to the master.
+# The first byte is a status indicating things like is TWC plugged in, does it
+# want power, is there an error, etc.
+# Next two bytes indicate the amount of power requested or the amount allowed in
+# 0.01 amp increments.
+# Next two bytes indicate the amount of power being used to charge the car, also in
+# 0.01 amp increments.
+# Remaining bytes always contain a value of 0.
 
 import serial
 import time
@@ -138,46 +186,142 @@ from dataclasses import dataclass
 # Configuration parameters
 #
 
-# These built-in defaults are overridden at runtime by TWCManagerSettings.txt.
-# For parameter descriptions, examples, and operational guidance, see:
-# - TWCManagerSettings.txt
-# - README.md
-
-# RS-485 adapter device path.
+# Most users will have only one ttyUSB adapter plugged in and the default value
+# of '/dev/ttyUSB0' below will work. If not, run 'dmesg |grep ttyUSB' on the
+# command line to find your rs485 adapter and put its ttyUSB# value in the
+# parameter below.
+# If you're using a non-USB adapter like an RS485 shield, the value may need to
+# be something like '/dev/serial0'.
 rs485Adapter = '/dev/ttyUSB0'
 
-# Installation-wide wiring limit.
+# Set wiringMaxAmpsAllTWCs to the maximum number of amps your charger wiring
+# can handle. I default this to a low 6A which should be safe with the minimum
+# standard of wiring in the areas of the world that I'm aware of.
+# Most U.S. chargers will be wired to handle at least 40A and sometimes 80A,
+# whereas EU chargers will handle at most 32A (using 3 AC lines instead of 2 so
+# the total power they deliver is similar).
+# Setting wiringMaxAmpsAllTWCs too high will trip the circuit breaker on your
+# charger at best or START A FIRE if the circuit breaker malfunctions.
+# Keep in mind that circuit breakers are designed to handle only 80% of their
+# max power rating continuously, so if your charger has a 50A circuit breaker,
+# put 50 * 0.8 = 40 here.
+# 40 amp breaker * 0.8 = 32 here.
+# 30 amp breaker * 0.8 = 24 here.
+# 100 amp breaker * 0.8 = 80 here.
+# IF YOU'RE NOT SURE WHAT TO PUT HERE, ASK THE ELECTRICIAN WHO INSTALLED YOUR
+# CHARGER.
 wiringMaxAmpsAllTWCs = 32 
 
-# Per-wall-connector wiring limit.
+# If all your chargers share a single circuit breaker, set wiringMaxAmpsPerTWC
+# to the same value as wiringMaxAmpsAllTWCs.
+# Rarely, each TWC will be wired to its own circuit breaker. If you're
+# absolutely sure your chargers each have a separate breaker, put the value of
+# that breaker * 0.8 here, and put the sum of all breakers * 0.8 as the value of
+# wiringMaxAmpsAllTWCs.
+# For example, if you have two TWCs each with a 50A breaker, set
+# wiringMaxAmpsPerTWC = 50 * 0.8 = 40 and wiringMaxAmpsAllTWCs = 40 + 40 = 80.
 wiringMaxAmpsPerTWC = 32 
 
-# Policy minimum charge current and hardware minimum current.
+# https://teslamotorsclub.com/tmc/threads/model-s-gen2-charger-efficiency-testing.78740/#post-1844789
+# says you're using 10.85% more power (91.75/82.77=1.1085) charging at 5A vs 40A,
+# 2.48% more power at 10A vs 40A, and 1.9% more power at 20A vs 40A.  This is
+# using a car with 2nd generation onboard AC/DC converter (VINs ending in 20000
+# and higher).
+# https://teslamotorsclub.com/tmc/threads/higher-amp-charging-is-more-efficient.24972/
+# says that cars using a 1st generation charger may use up to 30% more power
+# at 6A vs 40A!  However, the data refers to 120V 12A charging vs 240V 40A
+# charging. 120V 12A is technically the same power as 240V 6A, but the car
+# batteries need 400V DC to charge and a lot more power is wasted converting
+# 120V AC to 400V DC than 240V AC to 400V DC.
+#
+# The main point is 6A charging wastes a lot of power, so we default to charging
+# at a minimum of 12A by setting minAmpsPerTWC to 12. I picked 12A instead of 10A
+# because there is a theory that multiples of 3A are most efficient, though I
+# couldn't find any data showing that had been tested.
+#
+# Most EU chargers are connected to 230V, single-phase power which means 12A is
+# about the same power as in US chargers. If you have three-phase power, you can
+# lower minAmpsPerTWC to 6 and still be charging with more power than 12A on
+# single-phase.  For example, 12A * 230V * 1 = 2760W for single-phase power, while
+# 6A * 230V * 3 = 4140W for three-phase power. Consult an electrician if this
+# doesn't make sense.
+#
+# https://forums.tesla.com/forum/forums/charging-lowest-amperage-purposely
+# says another reason to charge at higher power is to preserve battery life.
+# The best charge rate is the capacity of the battery pack / 2.  Home chargers
+# can't reach that rate, so charging as fast as your wiring supports is best
+# from that standpoint.  It's not clear how much damage charging at slower
+# rates really does.
 minAmpsPerTWC = 1 
 minAmpsTWCSupports  = 1 
 
-# Restrict Tesla API control to vehicles considered at home when multiple cars exist.
+# When you have more than one vehicle associated with the Tesla car API and
+# onlyChargeMultiCarsAtHome = True, cars will only be controlled by the API when
+# parked at home. For example, when one vehicle is plugged in at home and
+# another is plugged in at a remote location and you've set TWCManager to stop
+# charging at the current time, only the one plugged in at home will be stopped
+# from charging using the car API.
+# Unfortunately, bugs in the car GPS system may cause a car to not be reported
+# as at home even if it is, in which case the car might not be charged when you
+# expect it to be. If you encounter that problem with multiple vehicles, you can
+# set onlyChargeMultiCarsAtHome = False, but you may encounter the problem of
+# a car not at home being stopped from charging by the API.
 onlyChargeMultiCarsAtHome = True
 
-# Offset applied to computed green-energy amps.
+# After determining how much green energy is available for charging, we add
+# greenEnergyAmpsOffset to the value. This is most often given a negative value
+# equal to the average amount of power consumed by everything other than car
+# charging. For example, if your house uses an average of 2.8A to power
+# computers, lights, etc while you expect the car to be charging, set
+# greenEnergyAmpsOffset = -2.8.
+#
+# If you have solar panels, look at your utility meter while your car charges.
+# If it says you're using 0.67kW, that means you should set
+# greenEnergyAmpsOffset = -0.67kW * 1000 / 240V = -2.79A assuming you're on the
+# North American 240V grid. In other words, during car charging, you want your
+# utility meter to show a value close to 0kW meaning no energy is being sent to
+# or from the grid.
 greenEnergyAmpsOffset = -3 
 
-# Log verbosity.
+# Choose how much debugging info to output.
+# 0 is no output other than errors.
+# 1 is just the most useful info.
+# 2-8 add debugging info
+# 9 includes raw RS-485 messages transmitted and received (2-3 per sec)
+# 10 is all info.
+# 11 is more than all info.  ;)
 debugLevel = 2 
 
-# Include milliseconds in log timestamps.
+# Choose whether to display milliseconds after time on each line of debug info.
 displayMilliseconds = False
 
-# Operating mode: master emulation, slave emulation, or listen/debug.
+# Normally we fake being a TWC Master using fakeMaster = 1.
+# Two other settings are available, but are only useful for debugging and
+# experimenting:
+#   Set fakeMaster = 0 to fake being a TWC Slave instead of Master.
+#   Set fakeMaster = 2 to display received RS-485 messages but not send any
+#                      unless you use the debugging web interface
+#                      (index.php?debugTWC=1) to send messages.
 fakeMaster = 1
 
-# RS-485 baud rate.
+# TWC's rs485 port runs at 9600 baud which has been verified with an
+# oscilloscope. Don't change this unless something changes in future hardware.
 baud       = 9600
 
-# Emulated local TWC ID.
+# All TWCs ship with a random two-byte TWCID. We default to using 0x7777 as our
+# fake TWC ID. There is a 1 in 64535 chance that this ID will match each real
+# TWC on the network, in which case you should pick a different random id below.
+# This isn't really too important because even if this ID matches another TWC on
+# the network, that TWC will pick its own new random ID as soon as it sees ours
+# conflicts.
 fakeTWCID  = bytearray(b'\x77\x77')
 
-# Sign bytes used in protocol frames.
+# TWCs send a seemingly-random byte after their 2-byte TWC id in a number of
+# messages. I call this byte their "Sign" for lack of a better term. The byte
+# never changes unless the TWC is reset or power cycled. We use hard-coded
+# values for now because I don't know if there are any rules to what values can
+# be chosen. I picked 77 because it's easy to recognize when looking at logs.
+# These shouldn't need to be changed.
 masterSign  = bytearray(b'\x77')
 slaveSign   = bytearray(b'\x77')
 
@@ -269,36 +413,6 @@ class WebIPCConfig:
     script_path: str
 
 
-def parse_bool(value):
-    value = str(value).strip().lower()
-    if(value in ('1', 'true', 'yes', 'on')):
-        return True
-    if(value in ('0', 'false', 'no', 'off')):
-        return False
-    raise ValueError('invalid boolean value: ' + str(value))
-
-
-def format_bool(value):
-    return 'true' if value else 'false'
-
-
-def parse_hex_bytes(value, expected_len=None):
-    cleaned = re.sub(r'[^0-9a-fA-F]', '', str(value))
-    if(cleaned == ''):
-        raise ValueError('empty hex byte string')
-    if(len(cleaned) % 2 != 0):
-        raise ValueError('hex byte string must contain an even number of digits')
-
-    parsed = bytearray.fromhex(cleaned)
-    if(expected_len != None and len(parsed) != expected_len):
-        raise ValueError('expected %d bytes but found %d' % (expected_len, len(parsed)))
-    return parsed
-
-
-def format_hex_bytes(value):
-    return ''.join('{:02X}'.format(byte) for byte in value)
-
-
 class TeslaTokenStore:
     """Persist Tesla API tokens in a dedicated JSON file or environment."""
     def __init__(self, file_name):
@@ -313,20 +427,11 @@ class TeslaTokenStore:
                 'access_token': env_access,
                 'refresh_token': env_refresh,
             }
-            env_audience = os.environ.get('TESLA_API_AUDIENCE', '').strip()
-            env_client_id = os.environ.get('TESLA_API_CLIENT_ID', '').strip()
-            env_fleet_base_url = os.environ.get('TESLA_FLEET_API_BASE_URL', '').strip()
             if(env_expires != ''):
                 try:
                     tokens['expires_at'] = float(env_expires)
                 except ValueError:
                     print(time_now() + ': ERROR: Invalid TESLA_API_EXPIRES_AT value.')
-            if(env_audience != ''):
-                tokens['audience'] = env_audience
-            if(env_client_id != ''):
-                tokens['client_id'] = env_client_id
-            if(env_fleet_base_url != ''):
-                tokens['fleet_api_base_url'] = env_fleet_base_url
             return tokens
 
         try:
@@ -347,12 +452,6 @@ class TeslaTokenStore:
             'refresh_token': tokens.get('refresh_token', ''),
             'expires_at': float(tokens.get('expires_at', 0)),
         }
-        if(tokens.get('audience', '') != ''):
-            payload['audience'] = tokens.get('audience', '')
-        if(tokens.get('client_id', '') != ''):
-            payload['client_id'] = tokens.get('client_id', '')
-        if(tokens.get('fleet_api_base_url', '') != ''):
-            payload['fleet_api_base_url'] = tokens.get('fleet_api_base_url', '')
 
         fh = open(self.file_name, 'w')
         try:
@@ -373,20 +472,6 @@ class SettingsStore:
         self.general_config = general_config
         self.file_name = general_config.settings_file_name
         self.parsers = (
-            ('rs485Adapter', str),
-            ('baud', int),
-            ('wiringMaxAmpsAllTWCs', float),
-            ('wiringMaxAmpsPerTWC', float),
-            ('minAmpsPerTWC', float),
-            ('minAmpsTWCSupports', float),
-            ('greenEnergyAmpsOffset', float),
-            ('debugLevel', int),
-            ('displayMilliseconds', parse_bool),
-            ('fakeMaster', int),
-            ('fakeTWCID', lambda value: parse_hex_bytes(value, 2)),
-            ('masterSign', lambda value: parse_hex_bytes(value, 1)),
-            ('slaveSign', lambda value: parse_hex_bytes(value, 1)),
-            ('onlyChargeMultiCarsAtHome', parse_bool),
             ('nonScheduledAmpsMax', int),
             ('scheduledAmpsMax', int),
             ('scheduledAmpsStartHour', float),
@@ -394,8 +479,16 @@ class SettingsStore:
             ('scheduledAmpsDaysBitmap', int),
             ('hourResumeTrackGreenEnergy', float),
             ('kWhDelivered', float),
+            ('carApiBearerToken', str),
+            ('carApiRefreshToken', str),
+            ('carApiTokenExpireTime', float),
             ('homeLat', float),
             ('homeLon', float),
+            ('teslaClientID', str),
+            ('teslaClientSecret', str),
+            ('teslaRedirectURI', str),
+            ('teslaOauthAudience', str),
+            ('teslaOauthScope', str),
         )
 
     def load(self):
@@ -405,9 +498,6 @@ class SettingsStore:
             fh = open(self.file_name, 'r')
 
             for line in fh:
-                if(re.search(r'^\s*(#.*)?$', line)):
-                    continue
-
                 found = False
                 for key, caster in self.parsers:
                     m = re.search(r'^\s*' + key + r'\s*=\s*(.+)', line, re.MULTILINE)
@@ -434,318 +524,26 @@ class SettingsStore:
 
     def save(self, settings):
         fh = open(self.file_name, 'w')
-        fh.write(self.render(settings))
+        fh.write('nonScheduledAmpsMax=' + str(settings['nonScheduledAmpsMax']) +
+                '\nscheduledAmpsMax=' + str(settings['scheduledAmpsMax']) +
+                '\nscheduledAmpsStartHour=' + str(settings['scheduledAmpsStartHour']) +
+                '\nscheduledAmpsEndHour=' + str(settings['scheduledAmpsEndHour']) +
+                '\nscheduledAmpsDaysBitmap=' + str(settings['scheduledAmpsDaysBitmap']) +
+                '\nhourResumeTrackGreenEnergy=' + str(settings['hourResumeTrackGreenEnergy']) +
+                '\nkWhDelivered=' + str(settings['kWhDelivered']) +
+                '\ncarApiBearerToken=' + str(settings['carApiBearerToken']) +
+                '\ncarApiRefreshToken=' + str(settings['carApiRefreshToken']) +
+                '\ncarApiTokenExpireTime=' + str(int(settings['carApiTokenExpireTime'])) +
+                '\nhomeLat=' + str(settings['homeLat']) +
+                '\nhomeLon=' + str(settings['homeLon']) +
+                '\nteslaClientID=' + str(settings['teslaClientID']) +
+                '\nteslaClientSecret=' + str(settings['teslaClientSecret']) +
+                '\nteslaRedirectURI=' + str(settings['teslaRedirectURI']) +
+                '\nteslaOauthAudience=' + str(settings['teslaOauthAudience']) +
+                '\nteslaOauthScope=' + str(settings['teslaOauthScope'])
+                )
+
         fh.close()
-
-    def render(self, settings):
-        return """# TWCManager settings
-#
-# Format:
-#   key=value
-# Blank lines and lines beginning with # are ignored.
-#
-# Serial device for the RS-485 adapter connected to the Tesla Wall Connector bus.
-# Typical values:
-#   /dev/ttyUSB0    USB-RS485 adapter
-#   /dev/ttyUSB1    if more than one USB serial adapter is connected
-#   /dev/serial0    onboard UART / HAT / GPIO serial adapter
-rs485Adapter={rs485Adapter}
-
-# RS-485 bus speed in bauds.
-# Tesla Gen2 Wall Connector uses 9600. Do not change it unless your hardware
-# really uses a different speed.
-# Example: 9600
-baud={baud}
-
-# Maximum continuous current available for all Wall Connectors combined.
-# This is the installation-wide limit that TWCManager will never intentionally
-# exceed.
-# Examples:
-#   32  -> 40A breaker at 80%
-#   24  -> 30A breaker at 80%
-#   80  -> 100A breaker at 80%
-wiringMaxAmpsAllTWCs={wiringMaxAmpsAllTWCs}
-
-# Maximum continuous current that a single Wall Connector may use.
-# If all chargers share one breaker, this is usually the same as
-# wiringMaxAmpsAllTWCs.
-# Example:
-#   Two chargers on separate 40A continuous branches:
-#   wiringMaxAmpsPerTWC=40
-wiringMaxAmpsPerTWC={wiringMaxAmpsPerTWC}
-
-# Minimum current that TWCManager should normally offer to a car.
-# Lower values allow charging with less surplus energy, but can be inefficient.
-# Examples:
-#   6   -> common technical minimum
-#   12  -> more efficient on many single-phase installations
-minAmpsPerTWC={minAmpsPerTWC}
-
-# Minimum current the Wall Connector hardware/protocol supports.
-# Normally leave this at the real hardware minimum and use minAmpsPerTWC for
-# policy decisions.
-# Example: 6
-minAmpsTWCSupports={minAmpsTWCSupports}
-
-# Offset applied to surplus-solar current calculation.
-# Use a negative value to reserve current for the rest of the house, or a
-# positive value to make charging start earlier.
-# Examples:
-#   -3   -> reserve about 3A for household base load
-#    0   -> use only measured surplus as-is
-greenEnergyAmpsOffset={greenEnergyAmpsOffset}
-
-# Log verbosity.
-# Common values:
-#   0  -> only errors
-#   1  -> useful operational logs
-#   2  -> normal debugging
-#   9  -> includes raw RS-485 frames
-debugLevel={debugLevel}
-
-# Whether log timestamps include milliseconds.
-# Allowed values: true, false
-# Example: true
-displayMilliseconds={displayMilliseconds}
-
-# Operating mode on the RS-485 bus.
-# Values:
-#   1 -> emulate a master Wall Connector and control slaves
-#   0 -> emulate a slave
-#   2 -> listen/debug mode, does not manage charging normally
-fakeMaster={fakeMaster}
-
-# Emulated local TWC identifier, in hexadecimal, 2 bytes.
-# Use 4 hex digits.
-# Example: 7777
-fakeTWCID={fakeTWCID}
-
-# Sign bytes used in linkready/heartbeat frames, in hexadecimal, 1 byte each.
-# Normally you should not change them.
-# Example: 77
-masterSign={masterSign}
-slaveSign={slaveSign}
-
-# If there are several Tesla vehicles in the account, only send API commands
-# to vehicles detected at home.
-# Allowed values: true, false
-# Example: true
-onlyChargeMultiCarsAtHome={onlyChargeMultiCarsAtHome}
-
-# Maximum charge current outside the scheduled charging window.
-# Use -1 to disable this limit and let other rules decide.
-# Examples:
-#   -1  -> no extra limit outside schedule
-#   16  -> cap charging at 16A outside schedule
-nonScheduledAmpsMax={nonScheduledAmpsMax}
-
-# Maximum charge current during the scheduled window.
-# Use -1 to disable scheduled charging.
-# Example:
-#   scheduledAmpsMax=25
-scheduledAmpsMax={scheduledAmpsMax}
-
-# Scheduled window start hour in local time, using decimal hours.
-# Examples:
-#   0.0  -> 00:00
-#   0.5  -> 00:30
-#   1.5  -> 01:30
-#   23.75 -> 23:45
-scheduledAmpsStartHour={scheduledAmpsStartHour}
-
-# Scheduled window end hour in local time, using decimal hours.
-# If end is lower than start, the schedule crosses midnight.
-# Example:
-#   start=23.0 and end=7.0 means 23:00 to 07:00
-scheduledAmpsEndHour={scheduledAmpsEndHour}
-
-# Scheduled charging days bitmap.
-# Bits:
-#   bit0=Monday, bit1=Tuesday, ... bit6=Sunday
-# Examples:
-#   127 -> every day
-#   31  -> Monday to Friday
-#   96  -> Saturday and Sunday
-scheduledAmpsDaysBitmap={scheduledAmpsDaysBitmap}
-
-# Automatically resume green-energy tracking at this local hour.
-# Use -1 to disable the automatic resume feature.
-# Examples:
-#   -1   -> disabled
-#   8.0  -> resume at 08:00 every day
-hourResumeTrackGreenEnergy={hourResumeTrackGreenEnergy}
-
-# Accumulated delivered energy counter in kWh.
-# This is persistent state, not a tuning parameter. TWCManager updates it over
-# time so the value survives restarts.
-# Example: 119.0
-kWhDelivered={kWhDelivered}
-
-# Home latitude used to decide whether a vehicle is considered "at home".
-# It is mainly used when onlyChargeMultiCarsAtHome=true.
-# Example for Madrid area: 40.488275
-homeLat={homeLat}
-
-# Home longitude used to decide whether a vehicle is considered "at home".
-# Example for Madrid area: -3.666271
-homeLon={homeLon}
-
-# Tesla API tokens are intentionally not stored in this file.
-# Use TeslaApiTokens.json or TESLA_API_* environment variables for secrets.
-""".format(
-            rs485Adapter=settings['rs485Adapter'],
-            baud=int(settings['baud']),
-            wiringMaxAmpsAllTWCs=settings['wiringMaxAmpsAllTWCs'],
-            wiringMaxAmpsPerTWC=settings['wiringMaxAmpsPerTWC'],
-            minAmpsPerTWC=settings['minAmpsPerTWC'],
-            minAmpsTWCSupports=settings['minAmpsTWCSupports'],
-            greenEnergyAmpsOffset=settings['greenEnergyAmpsOffset'],
-            debugLevel=int(settings['debugLevel']),
-            displayMilliseconds=format_bool(settings['displayMilliseconds']),
-            fakeMaster=int(settings['fakeMaster']),
-            fakeTWCID=format_hex_bytes(settings['fakeTWCID']),
-            masterSign=format_hex_bytes(settings['masterSign']),
-            slaveSign=format_hex_bytes(settings['slaveSign']),
-            onlyChargeMultiCarsAtHome=format_bool(settings['onlyChargeMultiCarsAtHome']),
-            nonScheduledAmpsMax=int(settings['nonScheduledAmpsMax']),
-            scheduledAmpsMax=int(settings['scheduledAmpsMax']),
-            scheduledAmpsStartHour=settings['scheduledAmpsStartHour'],
-            scheduledAmpsEndHour=settings['scheduledAmpsEndHour'],
-            scheduledAmpsDaysBitmap=int(settings['scheduledAmpsDaysBitmap']),
-            hourResumeTrackGreenEnergy=settings['hourResumeTrackGreenEnergy'],
-            kWhDelivered=settings['kWhDelivered'],
-            homeLat=settings['homeLat'],
-            homeLon=settings['homeLon'],
-        )
-
-
-class EnergyHistoryStore:
-    """Persist delivered-energy history with solar/grid breakdown."""
-    def __init__(self, general_config):
-        self.file_name = re.sub(r'/[^/]+$', r'/TWCManagerEnergyHistory.json',
-                                general_config.settings_file_name)
-
-    def load(self):
-        try:
-            fh = open(self.file_name, 'r')
-        except FileNotFoundError:
-            return {
-                'version': 1,
-                'last_total_kwh': 0.0,
-                'last_update_ts': 0.0,
-                'hourly': {},
-                'daily': {},
-            }
-
-        try:
-            payload = json.load(fh)
-        except json.JSONDecodeError:
-            print(time_now() + ': ERROR: Energy history file contains invalid JSON: ' + self.file_name)
-            payload = {}
-        finally:
-            fh.close()
-
-        if(not isinstance(payload, dict)):
-            payload = {}
-
-        hourly = payload.get('hourly', {})
-        if(not isinstance(hourly, dict)):
-            hourly = {}
-        daily = payload.get('daily', {})
-        if(not isinstance(daily, dict)):
-            daily = {}
-
-        return {
-            'version': 1,
-            'last_total_kwh': max(0.0, float(payload.get('last_total_kwh', 0.0))),
-            'last_update_ts': max(0.0, float(payload.get('last_update_ts', 0.0))),
-            'hourly': self._clean_hourly(hourly),
-            'daily': self._clean_daily(daily),
-        }
-
-    def save(self, history):
-        fh = open(self.file_name, 'w')
-        try:
-            json.dump(history, fh, indent=2, sort_keys=True)
-            fh.write('\n')
-        finally:
-            fh.close()
-
-    def _normalize_bucket(self, value):
-        if(isinstance(value, dict)):
-            solar = max(0.0, float(value.get('solar', 0.0)))
-            grid = max(0.0, float(value.get('grid', 0.0)))
-            total = max(0.0, float(value.get('total', solar + grid)))
-            if(total < solar + grid):
-                total = solar + grid
-            return {
-                'solar': solar,
-                'grid': grid,
-                'total': total,
-            }
-
-        try:
-            total = max(0.0, float(value))
-        except (TypeError, ValueError):
-            total = 0.0
-
-        return {
-            'solar': 0.0,
-            'grid': total,
-            'total': total,
-        }
-
-    def _clean_hourly(self, hourly):
-        cleaned = {}
-        for key, value in hourly.items():
-            if(re.match(r'^\d{4}-\d{2}-\d{2}T\d{2}$', str(key))):
-                cleaned[str(key)] = self._normalize_bucket(value)
-        return cleaned
-
-    def _clean_daily(self, daily):
-        cleaned = {}
-        for key, value in daily.items():
-            if(re.match(r'^\d{4}-\d{2}-\d{2}$', str(key))):
-                cleaned[str(key)] = self._normalize_bucket(value)
-        return cleaned
-
-    def record_delta(self, history, start_ts, end_ts, solar_kwh, grid_kwh, total_kwh):
-        if(history == None):
-            history = self.load()
-
-        start_ts = float(start_ts)
-        end_ts = float(end_ts)
-        solar_kwh = max(0.0, float(solar_kwh))
-        grid_kwh = max(0.0, float(grid_kwh))
-        total_kwh = max(0.0, float(total_kwh))
-        hourly = dict(history.get('hourly', {}))
-        daily = dict(history.get('daily', {}))
-
-        if(end_ts > start_ts and (solar_kwh > 0 or grid_kwh > 0)):
-            hourly_allocations = allocate_delta_by_hour(start_ts, end_ts, solar_kwh, grid_kwh)
-            for hour_key, values in hourly_allocations.items():
-                bucket = self._normalize_bucket(hourly.get(hour_key, {}))
-                bucket['solar'] = round(bucket['solar'] + values['solar'], 6)
-                bucket['grid'] = round(bucket['grid'] + values['grid'], 6)
-                bucket['total'] = round(bucket['solar'] + bucket['grid'], 6)
-                hourly[hour_key] = bucket
-
-            daily_allocations = allocate_delta_by_day_breakdown(start_ts, end_ts, solar_kwh, grid_kwh)
-            for day_key, values in daily_allocations.items():
-                bucket = self._normalize_bucket(daily.get(day_key, {}))
-                bucket['solar'] = round(bucket['solar'] + values['solar'], 6)
-                bucket['grid'] = round(bucket['grid'] + values['grid'], 6)
-                bucket['total'] = round(bucket['solar'] + bucket['grid'], 6)
-                daily[day_key] = bucket
-
-        history = {
-            'version': 2,
-            'last_total_kwh': total_kwh,
-            'last_update_ts': end_ts,
-            'hourly': prune_hourly_history(hourly),
-            'daily': prune_daily_history(daily),
-        }
-        return history
 
 
 class GreenEnergyMonitor:
@@ -792,7 +590,6 @@ class GreenEnergyMonitor:
             maxAmpsToDivideAmongSlaves = int(solarW / 240) + self.config.green_energy_amps_offset
             if(self.state != None):
                 self.state.maxAmpsToDivideAmongSlaves = maxAmpsToDivideAmongSlaves
-                self.state.greenEnergyAvailableAmps = max(0.0, float(maxAmpsToDivideAmongSlaves))
             if (debugLevel >= 2):
                 print("%s: Solar generating %dW so limit car charging to:\n" \
                      "          %.2fA + %.2fA = %.2fA.  Charge when above %.0fA (minAmpsPerTWC)." % \
@@ -823,11 +620,10 @@ class BackgroundTaskRunner:
             # a charge starts or we determine the car is done charging. To avoid
             # wasting memory queueing up a bunch of these tasks when we're
             # handling a charge cmd already, don't queue two of the same task.
-            return False
+            return
 
         self.cmds[task['cmd']] = True
         self.queue.put(task)
-        return True
 
     def run_forever(self):
         while True:
@@ -851,10 +647,11 @@ class BackgroundTaskRunner:
 
 
 class TeslaCarApi:
-    """Tesla Fleet API client used for wake and charge commands."""
-    auth_url = 'https://fleet-auth.prd.vn.cloud.tesla.com/oauth2/v3/token'
-    default_audience = 'https://fleet-api.prd.na.vn.cloud.tesla.com'
-    default_fleet_api_base_url = 'https://fleet-api.prd.na.vn.cloud.tesla.com/api/1'
+    """Minimal Tesla Owner API client used for wake and charge commands."""
+    auth_url = 'https://auth.tesla.com/oauth2/v3/token'
+    owner_api_base_url = 'https://owner-api.teslamotors.com/api/1'
+    client_id = '81527cff06843c8634fdc09e8ac0abefb46ac849f38fe1e431c2ef2106796384'
+    client_secret = 'c7257eb71a564034f9419ee651c7d0e5f7aa6bfbd18bafb5c5c033b093bb2fa3'
 
     def __init__(self, config=None, token_store=None):
         self.config = config if config != None else TeslaApiConfig(
@@ -872,19 +669,6 @@ class TeslaCarApi:
         self.transient_errors = ['upstream internal error', 'operation_timedout',
                                  'vehicle unavailable']
         self.error_retry_mins = 10
-        self.audience = os.environ.get('TESLA_API_AUDIENCE', self.default_audience).strip()
-        self.client_id = os.environ.get('TESLA_API_CLIENT_ID', '').strip()
-        fleet_api_base_url = os.environ.get(
-            'TESLA_FLEET_API_BASE_URL',
-            self.default_fleet_api_base_url
-        ).strip()
-        self.fleet_api_base_url = self.normalize_fleet_api_base_url(fleet_api_base_url)
-
-    def normalize_fleet_api_base_url(self, value):
-        value = str(value).strip().rstrip('/')
-        if(value.endswith('/api/1')):
-            return value
-        return value + '/api/1'
 
     def has_tokens(self):
         return (self.refresh_token != '' or self.bearer_token != '')
@@ -912,20 +696,6 @@ class TeslaCarApi:
             print(time_now() + ': ERROR: Token payload must include access_token or refresh_token.')
             return False
 
-        audience = str(tokens.get('audience', '')).strip()
-        client_id = str(tokens.get('client_id', '')).strip()
-        fleet_api_base_url = str(tokens.get('fleet_api_base_url', '')).strip()
-        if(audience != ''):
-            self.audience = audience
-        if(client_id != ''):
-            self.client_id = client_id
-        if(fleet_api_base_url != ''):
-            self.fleet_api_base_url = self.normalize_fleet_api_base_url(fleet_api_base_url)
-        elif(self.audience == 'https://fleet-api.prd.eu.vn.cloud.tesla.com'):
-            self.fleet_api_base_url = self.normalize_fleet_api_base_url(self.audience)
-        elif(self.audience == 'https://fleet-api.prd.na.vn.cloud.tesla.com'):
-            self.fleet_api_base_url = self.normalize_fleet_api_base_url(self.audience)
-
         self.bearer_token = access_token
         self.refresh_token = refresh_token
         if(expires_at > 0):
@@ -941,8 +711,7 @@ class TeslaCarApi:
 
         if(debugLevel >= 1):
             print(time_now() + ': Tesla API tokens imported. ' +
-                  ('Refresh token available.' if self.refresh_token != '' else 'Access token only.') +
-                  ' Fleet API base=' + self.fleet_api_base_url)
+                  ('Refresh token available.' if self.refresh_token != '' else 'Access token only.'))
         return True
 
     def persist_tokens(self):
@@ -951,9 +720,6 @@ class TeslaCarApi:
                 'access_token': self.bearer_token,
                 'refresh_token': self.refresh_token,
                 'expires_at': self.token_expire_time,
-                'audience': self.audience,
-                'client_id': self.client_id,
-                'fleet_api_base_url': self.fleet_api_base_url,
             })
 
     def auth_headers(self):
@@ -989,12 +755,6 @@ class TeslaCarApi:
 
         return response_json
 
-    def describe_response(self, payload):
-        try:
-            return json.dumps(payload, sort_keys=True)
-        except Exception:
-            return str(payload)
-
     def refresh_access_token(self):
         now = time.time()
 
@@ -1007,27 +767,16 @@ class TeslaCarApi:
 
         payload = {
             'grant_type': 'refresh_token',
+            'client_id': self.client_id,
+            'client_secret': self.client_secret,
             'refresh_token': self.refresh_token,
-            'audience': self.audience,
         }
-        if(self.client_id != ''):
-            payload['client_id'] = self.client_id
-        try:
-            resp = requests.post(
-                self.auth_url,
-                data=payload,
-                headers={
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                    'Accept': 'application/json',
-                },
-                timeout=60,
-            )
-            apiResponseDict = resp.json()
-        except Exception as exc:
-            print(time_now() + ': ERROR: Failed to refresh Tesla Fleet API token: ' + str(exc))
-            self.last_error_time = now
-            self.token_expire_time = now + timedelta(days=10).total_seconds()
-            return False
+        apiResponseDict = self.request_json(
+            'POST',
+            self.auth_url,
+            payload,
+            {'Content-Type': 'application/json'}
+        )
 
         try:
             self.bearer_token = apiResponseDict['access_token']
@@ -1073,29 +822,17 @@ class TeslaCarApi:
             if (len(self.vehicles) < 1):
                 apiResponseDict = self.request_json(
                     'GET',
-                    self.fleet_api_base_url + '/vehicles',
+                    self.owner_api_base_url + '/vehicles',
                     headers=self.auth_headers()
                 )
 
                 try:
-                    vehicle_list = apiResponseDict.get('response', [])
-                    if(type(vehicle_list) == dict and 'vehicles' in vehicle_list):
-                        vehicle_list = vehicle_list.get('vehicles', [])
-                    if(type(vehicle_list) != list):
-                        raise TypeError
+                    for i in range(0, apiResponseDict['count']):
+                        self.vehicles.append(CarApiVehicle(apiResponseDict['response'][i]['id'], self))
 
-                    self.vehicles = []
-                    for vehicle_payload in vehicle_list:
-                        vin = str(vehicle_payload.get('vin', '')).strip()
-                        if(vin == ''):
-                            continue
-                        self.vehicles.append(CarApiVehicle(vin, self))
-
-                except (AttributeError, KeyError, TypeError):
-                    print(time_now() + ": ERROR: Can't get list of vehicles via Tesla Fleet API from "
-                          + self.fleet_api_base_url + '/vehicles'
-                          + ". Will try again in " + str(self.error_retry_mins)
-                          + " minutes. Response: " + self.describe_response(apiResponseDict))
+                except (KeyError, TypeError):
+                    print(time_now() + ": ERROR: Can't get list of vehicles via Tesla car API.  Will try again in "
+                          + str(self.error_retry_mins) + " minutes.")
 
                     self.last_error_time = now
                     return False
@@ -1128,7 +865,7 @@ class TeslaCarApi:
                     vehicle.lastWakeAttemptTime = now
                     apiResponseDict = self.request_json(
                         'POST',
-                        self.fleet_api_base_url + '/vehicles/' + str(vehicle.ID) + '/wake_up',
+                        self.owner_api_base_url + '/vehicles/' + str(vehicle.ID) + '/wake_up',
                         headers=self.auth_headers()
                     )
 
@@ -1288,12 +1025,9 @@ class TeslaCarApi:
             for retryCount in range(0, 3):
                 self.last_start_or_stop_charge_time = time.time()
                 sentCommand = True
-                if (debugLevel >= 1):
-                    print(time_now() + ': Sending Tesla API charge_' + startOrStop
-                          + ' to vehicle ' + str(vehicle.ID) + '.')
                 apiResponseDict = self.request_json(
                     'POST',
-                    self.fleet_api_base_url + '/vehicles/' + str(vehicle.ID) + '/command/charge_' + startOrStop,
+                    self.owner_api_base_url + '/vehicles/' + str(vehicle.ID) + '/command/charge_' + startOrStop,
                     headers=self.auth_headers()
                 )
 
@@ -1361,9 +1095,6 @@ class TeslaCarApi:
                                 result = 'error'
                                 vehicle.lastErrorTime = now
                     else:
-                        if (debugLevel >= 1):
-                            print(time_now() + ': Tesla API charge_' + startOrStop
-                                  + ' accepted for vehicle ' + str(vehicle.ID) + '.')
                         break
 
                 except (KeyError, TypeError):
@@ -1410,35 +1141,17 @@ class WebIPCServer:
     def send(self, payload, block=False):
         self.queue.send(payload, block=block)
 
-def load_settings(state=None, api=None, api_config=None, general_config=None,
-                  energy_config=None, rs485_config=None):
-    global debugLevel, displayMilliseconds, fakeMaster, fakeTWCID, masterSign, \
-           slaveSign, rs485Adapter, baud, wiringMaxAmpsAllTWCs, \
-           wiringMaxAmpsPerTWC, minAmpsPerTWC, minAmpsTWCSupports, \
-           greenEnergyAmpsOffset, onlyChargeMultiCarsAtHome, settingsFileName, \
-           nonScheduledAmpsMax, scheduledAmpsMax, \
+def load_settings(state=None, api=None, api_config=None):
+    global debugLevel, settingsFileName, nonScheduledAmpsMax, scheduledAmpsMax, \
            scheduledAmpsStartHour, scheduledAmpsEndHour, \
            scheduledAmpsDaysBitmap, hourResumeTrackGreenEnergy, kWhDelivered, \
-           homeLat, homeLon
+           homeLat, homeLon, teslaClientID, teslaClientSecret, teslaRedirectURI, \
+           teslaOauthAudience, teslaOauthScope
 
     if(settings_store == None):
         return
 
     settings = settings_store.load()
-    rs485Adapter = settings.get('rs485Adapter', rs485Adapter)
-    baud = settings.get('baud', baud)
-    wiringMaxAmpsAllTWCs = settings.get('wiringMaxAmpsAllTWCs', wiringMaxAmpsAllTWCs)
-    wiringMaxAmpsPerTWC = settings.get('wiringMaxAmpsPerTWC', wiringMaxAmpsPerTWC)
-    minAmpsPerTWC = settings.get('minAmpsPerTWC', minAmpsPerTWC)
-    minAmpsTWCSupports = settings.get('minAmpsTWCSupports', minAmpsTWCSupports)
-    greenEnergyAmpsOffset = settings.get('greenEnergyAmpsOffset', greenEnergyAmpsOffset)
-    debugLevel = settings.get('debugLevel', debugLevel)
-    displayMilliseconds = settings.get('displayMilliseconds', displayMilliseconds)
-    fakeMaster = settings.get('fakeMaster', fakeMaster)
-    fakeTWCID = settings.get('fakeTWCID', fakeTWCID)
-    masterSign = settings.get('masterSign', masterSign)
-    slaveSign = settings.get('slaveSign', slaveSign)
-    onlyChargeMultiCarsAtHome = settings.get('onlyChargeMultiCarsAtHome', onlyChargeMultiCarsAtHome)
     nonScheduledAmpsMax = settings.get('nonScheduledAmpsMax', nonScheduledAmpsMax)
     scheduledAmpsMax = settings.get('scheduledAmpsMax', scheduledAmpsMax)
     scheduledAmpsStartHour = settings.get('scheduledAmpsStartHour', scheduledAmpsStartHour)
@@ -1448,22 +1161,11 @@ def load_settings(state=None, api=None, api_config=None, general_config=None,
     kWhDelivered = settings.get('kWhDelivered', kWhDelivered)
     homeLat = settings.get('homeLat', homeLat)
     homeLon = settings.get('homeLon', homeLon)
-    if(general_config != None):
-        general_config.debug_level = debugLevel
-        general_config.display_milliseconds = displayMilliseconds
-        general_config.fake_master = fakeMaster
-        general_config.fake_twc_id = fakeTWCID
-        general_config.master_sign = masterSign
-        general_config.slave_sign = slaveSign
-    if(energy_config != None):
-        energy_config.wiring_max_amps_all_twcs = wiringMaxAmpsAllTWCs
-        energy_config.wiring_max_amps_per_twc = wiringMaxAmpsPerTWC
-        energy_config.min_amps_per_twc = minAmpsPerTWC
-        energy_config.min_amps_twc_supports = minAmpsTWCSupports
-        energy_config.green_energy_amps_offset = greenEnergyAmpsOffset
-    if(rs485_config != None):
-        rs485_config.adapter = rs485Adapter
-        rs485_config.baud_rate = baud
+    teslaClientID = settings.get('teslaClientID', teslaClientID)
+    teslaClientSecret = settings.get('teslaClientSecret', teslaClientSecret)
+    teslaRedirectURI = settings.get('teslaRedirectURI', teslaRedirectURI)
+    teslaOauthAudience = settings.get('teslaOauthAudience', teslaOauthAudience)
+    teslaOauthScope = settings.get('teslaOauthScope', teslaOauthScope)
     if(state != None):
         state.nonScheduledAmpsMax = nonScheduledAmpsMax
         state.scheduledAmpsMax = scheduledAmpsMax
@@ -1472,19 +1174,27 @@ def load_settings(state=None, api=None, api_config=None, general_config=None,
         state.scheduledAmpsDaysBitmap = scheduledAmpsDaysBitmap
         state.hourResumeTrackGreenEnergy = hourResumeTrackGreenEnergy
         state.kWhDelivered = kWhDelivered
+    if(api != None):
+        if(not api.has_tokens()):
+            legacy_access = settings.get('carApiBearerToken', '')
+            legacy_refresh = settings.get('carApiRefreshToken', '')
+            legacy_expires = settings.get('carApiTokenExpireTime', api.token_expire_time)
+            if(legacy_access != '' or legacy_refresh != ''):
+                api.import_tokens({
+                    'access_token': legacy_access,
+                    'refresh_token': legacy_refresh,
+                    'expires_at': legacy_expires,
+                }, save=False)
     if(api_config != None):
         api_config.home_lat = homeLat
         api_config.home_lon = homeLon
 
 def save_settings(state=None, api=None, api_config=None):
-    global debugLevel, displayMilliseconds, fakeMaster, fakeTWCID, masterSign, \
-           slaveSign, rs485Adapter, baud, wiringMaxAmpsAllTWCs, \
-           wiringMaxAmpsPerTWC, minAmpsPerTWC, minAmpsTWCSupports, \
-           greenEnergyAmpsOffset, onlyChargeMultiCarsAtHome, settingsFileName, \
-           nonScheduledAmpsMax, scheduledAmpsMax, \
+    global debugLevel, settingsFileName, nonScheduledAmpsMax, scheduledAmpsMax, \
            scheduledAmpsStartHour, scheduledAmpsEndHour, \
            scheduledAmpsDaysBitmap, hourResumeTrackGreenEnergy, kWhDelivered, \
-           homeLat, homeLon
+           homeLat, homeLon, teslaClientID, teslaClientSecret, teslaRedirectURI, \
+           teslaOauthAudience, teslaOauthScope
 
     if(settings_store == None):
         return
@@ -1505,20 +1215,6 @@ def save_settings(state=None, api=None, api_config=None):
         homeLat = api_config.home_lat
         homeLon = api_config.home_lon
     settings_store.save({
-        'rs485Adapter': rs485Adapter,
-        'baud': baud,
-        'wiringMaxAmpsAllTWCs': wiringMaxAmpsAllTWCs,
-        'wiringMaxAmpsPerTWC': wiringMaxAmpsPerTWC,
-        'minAmpsPerTWC': minAmpsPerTWC,
-        'minAmpsTWCSupports': minAmpsTWCSupports,
-        'greenEnergyAmpsOffset': greenEnergyAmpsOffset,
-        'debugLevel': debugLevel,
-        'displayMilliseconds': displayMilliseconds,
-        'fakeMaster': fakeMaster,
-        'fakeTWCID': fakeTWCID,
-        'masterSign': masterSign,
-        'slaveSign': slaveSign,
-        'onlyChargeMultiCarsAtHome': onlyChargeMultiCarsAtHome,
         'nonScheduledAmpsMax': nonScheduledAmpsMax,
         'scheduledAmpsMax': scheduledAmpsMax,
         'scheduledAmpsStartHour': scheduledAmpsStartHour,
@@ -1526,8 +1222,16 @@ def save_settings(state=None, api=None, api_config=None):
         'scheduledAmpsDaysBitmap': scheduledAmpsDaysBitmap,
         'hourResumeTrackGreenEnergy': hourResumeTrackGreenEnergy,
         'kWhDelivered': kWhDelivered,
+        'carApiBearerToken': '',
+        'carApiRefreshToken': '',
+        'carApiTokenExpireTime': time.time(),
         'homeLat': homeLat,
         'homeLon': homeLon,
+        'teslaClientID': teslaClientID,
+        'teslaClientSecret': teslaClientSecret,
+        'teslaRedirectURI': teslaRedirectURI,
+        'teslaOauthAudience': teslaOauthAudience,
+        'teslaOauthScope': teslaOauthScope,
     })
 
 def trim_pad(s:bytearray, makeLen):
@@ -1539,227 +1243,6 @@ def trim_pad(s:bytearray, makeLen):
         s = s[0:makeLen]
 
     return s
-
-
-def prune_daily_history(daily, keep_days=400):
-    items = sorted(daily.items())
-    if(len(items) <= keep_days):
-        return dict(items)
-    return dict(items[-keep_days:])
-
-
-def prune_hourly_history(hourly, keep_hours=24 * 45):
-    items = sorted(hourly.items())
-    if(len(items) <= keep_hours):
-        return dict(items)
-    return dict(items[-keep_hours:])
-
-
-def allocate_breakdown(start_ts, end_ts, solar_kwh, grid_kwh, bucket_format, step):
-    allocations = {}
-    if((solar_kwh <= 0 and grid_kwh <= 0) or end_ts < start_ts):
-        return allocations
-
-    start_dt = datetime.fromtimestamp(start_ts)
-    end_dt = datetime.fromtimestamp(end_ts)
-    total_seconds = max(end_ts - start_ts, 1.0)
-    cursor = start_dt
-
-    while cursor < end_dt:
-        segment_end = min(step(cursor), end_dt)
-        segment_seconds = max((segment_end - cursor).total_seconds(), 0.0)
-        bucket_key = cursor.strftime(bucket_format)
-        if(bucket_key not in allocations):
-            allocations[bucket_key] = {'solar': 0.0, 'grid': 0.0, 'total': 0.0}
-        allocations[bucket_key]['solar'] += solar_kwh * (segment_seconds / total_seconds)
-        allocations[bucket_key]['grid'] += grid_kwh * (segment_seconds / total_seconds)
-        allocations[bucket_key]['total'] = allocations[bucket_key]['solar'] + allocations[bucket_key]['grid']
-        cursor = segment_end
-
-    if(len(allocations) == 0):
-        allocations[start_dt.strftime(bucket_format)] = {
-            'solar': solar_kwh,
-            'grid': grid_kwh,
-            'total': solar_kwh + grid_kwh,
-        }
-
-    return allocations
-
-
-def allocate_delta_by_day_breakdown(start_ts, end_ts, solar_kwh, grid_kwh):
-    return allocate_breakdown(
-        start_ts,
-        end_ts,
-        solar_kwh,
-        grid_kwh,
-        '%Y-%m-%d',
-        lambda cursor: (cursor + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0),
-    )
-
-
-def allocate_delta_by_hour(start_ts, end_ts, solar_kwh, grid_kwh):
-    return allocate_breakdown(
-        start_ts,
-        end_ts,
-        solar_kwh,
-        grid_kwh,
-        '%Y-%m-%dT%H',
-        lambda cursor: (cursor + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0),
-    )
-
-
-def calculate_energy_periods(history, now_ts=None):
-    if(now_ts == None):
-        now_ts = time.time()
-
-    now_dt = datetime.fromtimestamp(now_ts)
-    daily = history.get('daily', {}) if history != None else {}
-    today_key = now_dt.strftime('%Y-%m-%d')
-    iso_year, iso_week, _ = now_dt.isocalendar()
-    current_month = now_dt.strftime('%Y-%m')
-    current_year = now_dt.strftime('%Y')
-
-    periods = {
-        'today': 0.0,
-        'week': 0.0,
-        'month': 0.0,
-        'year': 0.0,
-    }
-
-    for day_key, value in daily.items():
-        try:
-            day_dt = datetime.strptime(day_key, '%Y-%m-%d')
-            if(isinstance(value, dict)):
-                amount = max(0.0, float(value.get('total', value.get('solar', 0.0) + value.get('grid', 0.0))))
-            else:
-                amount = max(0.0, float(value))
-        except (TypeError, ValueError):
-            continue
-
-        if(day_key == today_key):
-            periods['today'] += amount
-        if(day_dt.strftime('%Y-%m') == current_month):
-            periods['month'] += amount
-        if(day_dt.strftime('%Y') == current_year):
-            periods['year'] += amount
-
-        day_iso_year, day_iso_week, _ = day_dt.isocalendar()
-        if(day_iso_year == iso_year and day_iso_week == iso_week):
-            periods['week'] += amount
-
-    return periods
-
-
-def build_energy_chart_payload(history, now_ts=None):
-    if(now_ts == None):
-        now_ts = time.time()
-
-    now_dt = datetime.fromtimestamp(now_ts)
-    hourly = history.get('hourly', {}) if history != None else {}
-    daily = history.get('daily', {}) if history != None else {}
-
-    today_labels = []
-    today_solar = []
-    today_grid = []
-    for hour in range(24):
-        dt = now_dt.replace(hour=hour, minute=0, second=0, microsecond=0)
-        key = dt.strftime('%Y-%m-%dT%H')
-        bucket = hourly.get(key, {})
-        today_labels.append(dt.strftime('%H:00'))
-        today_solar.append(round(float(bucket.get('solar', 0.0)), 3))
-        today_grid.append(round(float(bucket.get('grid', 0.0)), 3))
-
-    week_labels = []
-    week_solar = []
-    week_grid = []
-    week_start = (now_dt - timedelta(days=now_dt.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
-    for offset in range(7):
-        dt = week_start + timedelta(days=offset)
-        key = dt.strftime('%Y-%m-%d')
-        bucket = daily.get(key, {})
-        week_labels.append(dt.strftime('%a'))
-        week_solar.append(round(float(bucket.get('solar', 0.0)), 3))
-        week_grid.append(round(float(bucket.get('grid', 0.0)), 3))
-
-    month_labels = []
-    month_solar = []
-    month_grid = []
-    month_start = (now_dt - timedelta(days=29)).replace(hour=0, minute=0, second=0, microsecond=0)
-    for offset in range(30):
-        dt = month_start + timedelta(days=offset)
-        key = dt.strftime('%Y-%m-%d')
-        bucket = daily.get(key, {})
-        month_labels.append(dt.strftime('%d %b'))
-        month_solar.append(round(float(bucket.get('solar', 0.0)), 3))
-        month_grid.append(round(float(bucket.get('grid', 0.0)), 3))
-
-    year_labels = []
-    year_solar = []
-    year_grid = []
-    for months_back in range(11, -1, -1):
-        month_dt = (now_dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0))
-        month_number = month_dt.month - months_back
-        year_number = month_dt.year
-        while month_number <= 0:
-            month_number += 12
-            year_number -= 1
-        while month_number > 12:
-            month_number -= 12
-            year_number += 1
-
-        solar_total = 0.0
-        grid_total = 0.0
-        month_prefix = '%04d-%02d-' % (year_number, month_number)
-        for day_key, bucket in daily.items():
-            if(str(day_key).startswith(month_prefix)):
-                solar_total += float(bucket.get('solar', 0.0))
-                grid_total += float(bucket.get('grid', 0.0))
-
-        label_dt = datetime(year_number, month_number, 1)
-        year_labels.append(label_dt.strftime('%b'))
-        year_solar.append(round(solar_total, 3))
-        year_grid.append(round(grid_total, 3))
-
-    return {
-        'today': {'labels': today_labels, 'solar': today_solar, 'grid': today_grid},
-        'week': {'labels': week_labels, 'solar': week_solar, 'grid': week_grid},
-        'month': {'labels': month_labels, 'solar': month_solar, 'grid': month_grid},
-        'year': {'labels': year_labels, 'solar': year_solar, 'grid': year_grid},
-    }
-
-
-def update_energy_tracking(state, now, general_config=None):
-    global energy_history_store
-
-    debug_level = general_config.debug_level if general_config != None else debugLevel
-    if(general_config != None and general_config.fake_master != 1):
-        state.timeLastkWhDelivered = now
-        return
-
-    elapsed = now - state.timeLastkWhDelivered
-    if(elapsed <= 0):
-        return
-
-    total_amps = total_amps_actual_all_twcs(state, general_config)
-    solar_amps = min(total_amps, max(0.0, float(getattr(state, 'greenEnergyAvailableAmps', 0.0))))
-    grid_amps = max(0.0, total_amps - solar_amps)
-    solar_kwh = ((240 * solar_amps) / 1000 / 60 / 60) * elapsed
-    grid_kwh = ((240 * grid_amps) / 1000 / 60 / 60) * elapsed
-    state.kWhDelivered += (solar_kwh + grid_kwh)
-    state.timeLastkWhDelivered = now
-
-    if(energy_history_store != None):
-        state.energyHistory = energy_history_store.record_delta(
-            state.energyHistory, now - elapsed, now, solar_kwh, grid_kwh, state.kWhDelivered
-        )
-
-    if(time.time() - state.timeLastkWhSaved >= 300.0):
-        state.timeLastkWhSaved = now
-        if(debug_level >= 9):
-            print(time_now() + ": Delivered %.3fkWh total" % (state.kWhDelivered))
-        if(energy_history_store != None):
-            energy_history_store.save(state.energyHistory)
-        save_settings(state)
 
 
 def is_time_in_window(hour_now, start_hour, end_hour):
@@ -2046,9 +1529,9 @@ def car_api_charge(charge):
 
 def queue_background_task(task):
     if(background_task_runner == None):
-        return False
+        return
 
-    return background_task_runner.queue_task(task)
+    background_task_runner.queue_task(task)
 
 
 def background_tasks_thread():
@@ -2127,7 +1610,7 @@ class CarApiVehicle:
         for retryCount in range(0, 3):
             apiResponseDict = self.api.request_json(
                 'GET',
-                self.api.fleet_api_base_url + '/vehicles/' + str(self.ID) + '/vehicle_data',
+                self.api.owner_api_base_url + '/vehicles/' + str(self.ID) + '/vehicle_data',
                 headers=self.api.auth_headers()
             )
 
@@ -2235,11 +1718,6 @@ class TWCSlave:
     local_twc_id = None
     general_config = None
     energy_config = None
-    lastVehicleConnected = None
-    lastVehicleCharging = None
-    autoStartChargeRequested = False
-    lastChargeStartRequestTime = 0
-    lastChargeStopRequestTime = 0
 
     def __init__(self, TWCID, maxAmps, car_api=None, task_runner=None, state=None,
                  local_twc_id=None, general_config=None, energy_config=None):
@@ -2269,59 +1747,6 @@ class TWCSlave:
         self.local_twc_id = local_twc_id if local_twc_id != None else default_local_twc_id
         self.wiringMaxAmps = self.energy_config.wiring_max_amps_per_twc
         self.minAmpsTWCSupports = self.energy_config.min_amps_twc_supports
-        self.lastVehicleConnected = None
-        self.lastVehicleCharging = None
-        self.autoStartChargeRequested = False
-        self.lastChargeStartRequestTime = 0
-        self.lastChargeStopRequestTime = 0
-
-    def describe_reported_state(self, state_code):
-        state_map = {
-            0x00: 'ready',
-            0x01: 'plugged in, charging',
-            0x02: 'error',
-            0x03: 'plugged in, do not charge',
-            0x04: 'plugged in, ready to charge',
-            0x05: 'busy',
-            0x08: 'stopped charging',
-        }
-        if (state_code in state_map):
-            return state_map[state_code]
-        return 'state 0x%02X' % state_code
-
-    def log_vehicle_state_transition(self, prev_state, prev_amps_actual):
-        debug_level = self.general_config.debug_level
-        prev_connected = (prev_state in (0x01, 0x03, 0x04, 0x05, 0x08) or prev_amps_actual >= 1.0)
-        now_connected = (self.reportedState in (0x01, 0x03, 0x04, 0x05, 0x08) or self.reportedAmpsActual >= 1.0)
-        prev_charging = (prev_amps_actual >= 1.0 or prev_state == 0x01)
-        now_charging = (self.reportedAmpsActual >= 1.0 or self.reportedState == 0x01)
-        twc_id = '%02X%02X' % (self.TWCID[0], self.TWCID[1])
-
-        if (self.lastVehicleConnected is None):
-            self.lastVehicleConnected = now_connected
-        elif (self.lastVehicleConnected != now_connected):
-            if (now_connected):
-                print(time_now() + ': TWC ' + twc_id + ' detected vehicle connected. ' +
-                      'state=' + self.describe_reported_state(self.reportedState) +
-                      ', amps=' + ('%.2f' % self.reportedAmpsActual))
-            elif (debug_level >= 1):
-                print(time_now() + ': TWC ' + twc_id + ' detected vehicle disconnected.')
-                self.autoStartChargeRequested = False
-            self.lastVehicleConnected = now_connected
-
-        if (self.lastVehicleCharging is None):
-            self.lastVehicleCharging = now_charging
-        elif (self.lastVehicleCharging != now_charging):
-            if (now_charging):
-                print(time_now() + ': TWC ' + twc_id + ' vehicle started charging. ' +
-                      'state=' + self.describe_reported_state(self.reportedState) +
-                      ', amps=' + ('%.2f' % self.reportedAmpsActual))
-            elif (debug_level >= 1):
-                print(time_now() + ': TWC ' + twc_id + ' vehicle stopped charging. ' +
-                      'state=' + self.describe_reported_state(self.reportedState) +
-                      ', amps=' + ('%.2f' % self.reportedAmpsActual))
-                self.autoStartChargeRequested = False
-            self.lastVehicleCharging = now_charging
 
     def print_status(self, heartbeatData):
         if(self.state == None):
@@ -2400,43 +1825,6 @@ class TWCSlave:
 
             if (len(self.masterHeartbeatData) != (7 if self.protocolVersion == 1 else 9)):
                 print(time_now() + ': Error in print_status displaying masterHeartbeatData', self.masterHeartbeatData)
-
-    def queue_charge_request(self, charge, reason):
-        debug_level = self.general_config.debug_level
-        now = time.time()
-        last_request_time = (
-            self.lastChargeStartRequestTime if charge else self.lastChargeStopRequestTime
-        )
-
-        # Match TeslaCarApi.charge()'s one-minute command rate limit so a TWC
-        # does not re-request the same start/stop command on every heartbeat
-        # while the car or API is still settling.
-        if(now - last_request_time < 60):
-            return False
-
-        queued = False
-        if(self.task_runner != None):
-            queued = self.task_runner.queue_task({'cmd':'charge', 'charge':charge})
-        else:
-            queued = queue_background_task({'cmd':'charge', 'charge':charge})
-
-        if(not queued):
-            return False
-
-        if(charge):
-            self.lastChargeStartRequestTime = now
-        else:
-            self.lastChargeStopRequestTime = now
-
-        if(debug_level >= 1):
-            print(time_now() + ': TWC %02X%02X queue Tesla API %s because %s' % (
-                self.TWCID[0],
-                self.TWCID[1],
-                ('start charge' if charge else 'stop charge'),
-                reason,
-            ))
-
-        return True
 
     def send_slave_heartbeat(self, masterID):
         # Send slave heartbeat
@@ -2704,25 +2092,19 @@ class TWCSlave:
                 # them both from charging.  If the away vehicle is not currently
                 # charging, I'm not sure if this would prevent it from charging
                 # when next plugged in.
-                self.queue_charge_request(
-                    False,
-                    'car is drawing %.2fA while offered amps is 0.' % (
-                        self.reportedAmpsActual,
-                    )
-                )
+                if(self.task_runner != None):
+                    self.task_runner.queue_task({'cmd':'charge', 'charge':False})
+                else:
+                    queue_background_task({'cmd':'charge', 'charge':False})
             elif(self.lastAmpsOffered >= 5.0 and self.reportedAmpsActual < 2.0
                  and self.reportedState != 0x02
             ):
                 # Car is not charging and is not reporting an error state, so
                 # try starting charge via car api.
-                self.autoStartChargeRequested = True
-                self.queue_charge_request(
-                    True,
-                    'vehicle is present but drawing only %.2fA with %.2fA offered.' % (
-                        self.reportedAmpsActual,
-                        self.lastAmpsOffered,
-                    )
-                )
+                if(self.task_runner != None):
+                    self.task_runner.queue_task({'cmd':'charge', 'charge':True})
+                else:
+                    queue_background_task({'cmd':'charge', 'charge':True})
             elif(self.reportedAmpsActual > 4.0):
                 # At least one plugged in car is successfully charging. We don't
                 # know which car it is, so we must set
@@ -2753,13 +2135,10 @@ class TWCSlave:
         min_amps_per_twc = self.energy_config.min_amps_per_twc
 
         now                     = time.time()
-        prev_reported_state     = self.reportedState
-        prev_reported_amps      = self.reportedAmpsActual
         self.timeLastRx         = now
         self.reportedAmpsMax    = ((heartbeatData[1] << 8) + heartbeatData[2]) / 100
         self.reportedAmpsActual = ((heartbeatData[3] << 8) + heartbeatData[4]) / 100
         self.reportedState      = heartbeatData[0]
-        self.log_vehicle_state_transition(prev_reported_state, prev_reported_amps)
 
         # self.lastAmpsOffered is initialized to -1.
         # If we find it at that value, set it to the current value reported by the
@@ -2988,8 +2367,6 @@ class TWCSlave:
                 desiredAmpsOffered = 0
 
             if (
-                   not self.autoStartChargeRequested
-                     and
                    self.lastAmpsOffered > 0
                      and
                    (
@@ -3067,10 +2444,6 @@ class TWCSlave:
                               ' < 60 or self.reportedAmpsActual ' + str(self.reportedAmpsActual) +
                               ' < 4')
                     desiredAmpsOffered = minAmpsToOffer
-            elif (self.autoStartChargeRequested and debug_level >= 10):
-                print(time_now() + ': TWC %02X%02X auto-started charge no longer has enough '
-                      'available power (below minAmpsToOffer %.2fA).' %
-                      (self.TWCID[0], self.TWCID[1], minAmpsToOffer))
         else:
             # We can tell the TWC how much power to use in 0.01A increments, but
             # the car will only alter its power in larger increments (somewhere
@@ -3244,12 +2617,6 @@ class TWCSlave:
         # desiredAmpsOffered == 0. In that case, slave's response should always
         # look like this:
         #   S 032e 0.25/0.00A: 03 0000 0019 0000 M: 05 0000 0000 0000
-        if(self.autoStartChargeRequested and desiredAmpsOffered == 0):
-            self.queue_charge_request(
-                False,
-                'auto-started charging no longer has enough available power.'
-            )
-
         if(self.reportedAmpsMax != desiredAmpsOffered
            or desiredAmpsOffered == 0
         ):
@@ -3385,6 +2752,12 @@ teslaApiTokenFileName = os.environ.get(
 )
 nonScheduledAmpsMax = -1
 timeLastHeartbeatDebugOutput = 0
+teslaClientID = ''
+teslaClientSecret = ''
+teslaRedirectURI = 'http://localhost/callback'
+teslaOauthAudience = 'https://fleet-api.prd.na.vn.cloud.tesla.com'
+teslaOauthScope = 'openid offline_access user_data vehicle_device_data vehicle_location vehicle_cmds vehicle_charging_cmds'
+
 webMsgPacked = ''
 webMsgMaxSize = 300
 webMsgResult = 0
@@ -3403,7 +2776,6 @@ backgroundTasksThread = None
 ser = None
 webIPCqueue = None
 webIPCkey = None
-energy_history_store = None
 
 #
 # End global vars
@@ -3444,16 +2816,9 @@ class RuntimeState:
         self.spikeAmpsToCancel6ALimit = 16
         self.timeLastGreenEnergyCheck = 0
         self.hourResumeTrackGreenEnergy = -1
-        self.greenEnergyAvailableAmps = 0.0
         self.kWhDelivered = 119
         self.timeLastkWhDelivered = time.time()
         self.timeLastkWhSaved = time.time()
-        self.energyHistory = {
-            'version': 1,
-            'last_total_kwh': 0.0,
-            'last_update_ts': 0.0,
-            'daily': {},
-        }
         self.nonScheduledAmpsMax = -1
         self.timeTo0Aafter06 = 0
         self.timeToRaise2A = 0
@@ -3462,7 +2827,6 @@ class TWCManagerApp:
     """Wire dependencies together and run the main charger-control loop."""
     def __init__(self):
         global settings_store, tesla_token_store, tesla_car_api, green_energy_monitor, \
-               energy_history_store, \
                background_task_runner, backgroundTasksQueue, backgroundTasksCmds, \
                backgroundTasksLock, backgroundTasksThread, rs485_transport, ser, \
                web_ipc_server, webIPCkey, webIPCqueue
@@ -3496,18 +2860,9 @@ class TWCManagerApp:
         self.web_ipc_config = WebIPCConfig(script_path=__file__)
         self.state = RuntimeState()
         settings_store = SettingsStore(self.general_config)
-        energy_history_store = EnergyHistoryStore(self.general_config)
         tesla_token_store = TeslaTokenStore(teslaApiTokenFileName)
         tesla_car_api = TeslaCarApi(self.tesla_api_config, tesla_token_store)
-        self.state.energyHistory = energy_history_store.load()
-        load_settings(
-            self.state,
-            tesla_car_api,
-            self.tesla_api_config,
-            self.general_config,
-            self.energy_config,
-            self.rs485_config,
-        )
+        load_settings(self.state, tesla_car_api, self.tesla_api_config)
         tesla_car_api.load_tokens()
         green_energy_monitor = GreenEnergyMonitor(self.energy_config, backgroundTasksLock, self.state)
         background_task_runner = BackgroundTaskRunner(
@@ -3549,7 +2904,6 @@ class TWCManagerApp:
                 time.sleep(0.025)
 
                 now = time.time()
-                update_energy_tracking(state, now, general_config)
 
                 if(general_config.fake_master == 1):
                     if(state.numInitMsgsToSend > 5):
@@ -3607,7 +2961,6 @@ class TWCManagerApp:
                         numPackets = 0
                         if(webMsg == b'getStatus'):
                             needCarApiBearerToken = False
-                            energy_periods = calculate_energy_periods(state.energyHistory, now)
                             if(tesla_car_api != None and tesla_car_api.has_tokens() == False):
                                 for i in range(0, len(state.slaveTWCRoundRobin)):
                                     if(state.slaveTWCRoundRobin[i].protocolVersion == 2):
@@ -3628,12 +2981,6 @@ class TWCManagerApp:
                                 '`' + "%02d:%02d" % (int(state.hourResumeTrackGreenEnergy),
                                                      int((state.hourResumeTrackGreenEnergy % 1) * 60)) +
                                 '`' + ('1' if needCarApiBearerToken else '0') +
-                                '`' + str(int(max(0, state.chargeNowTimeEnd - now))) +
-                                '`' + ("%.3f" % (state.kWhDelivered)) +
-                                '`' + ("%.3f" % (energy_periods['today'])) +
-                                '`' + ("%.3f" % (energy_periods['week'])) +
-                                '`' + ("%.3f" % (energy_periods['month'])) +
-                                '`' + ("%.3f" % (energy_periods['year'])) +
                                 '`' + str(len(state.slaveTWCRoundRobin))
                                 )
 
@@ -3688,9 +3035,6 @@ class TWCManagerApp:
                                 webResponseMsg = hex_str(state.lastTWCResponseMsg)
                             else:
                                 webResponseMsg = 'None'
-                        elif(webMsg == b'getEnergyHistory'):
-                            webResponseMsg = json.dumps(build_energy_chart_payload(state.energyHistory, now), separators=(',', ':'))
-                            numPackets = math.ceil(len(webResponseMsg) / 290)
                         elif(webMsg[0:13] == b'carApiTokens='):
                             try:
                                 tokenPayload = json.loads(webMsg[13:len(webMsg)].decode('utf-8'))
@@ -4022,22 +3366,13 @@ class TWCManagerApp:
                                 continue
 
                             amps = (state.slaveHeartbeatData[1] << 8) + state.slaveHeartbeatData[2]
-                            fake_slave_elapsed = max(0.0, now - state.timeLastkWhDelivered)
-                            fake_slave_delta = (((240 * (amps/100)) / 1000 / 60 / 60) * fake_slave_elapsed)
-                            state.kWhDelivered += fake_slave_delta
+                            state.kWhDelivered += (((240 * (amps/100)) / 1000 / 60 / 60) * (now - state.timeLastkWhDelivered))
                             state.timeLastkWhDelivered = now
-                            if(energy_history_store != None):
-                                state.energyHistory = energy_history_store.record_delta(
-                                    state.energyHistory, now - fake_slave_elapsed, now,
-                                    0.0, fake_slave_delta, state.kWhDelivered
-                                )
                             if(time.time() - state.timeLastkWhSaved >= 300.0):
                                 state.timeLastkWhSaved = now
                                 if(general_config.debug_level >= 9):
                                     print(time_now() + ": Fake slave has delivered %.3fkWh" % \
                                        (state.kWhDelivered))
-                                if(energy_history_store != None):
-                                    energy_history_store.save(state.energyHistory)
                                 save_settings(state)
 
                             if(heartbeatData[0] == 0x07):
