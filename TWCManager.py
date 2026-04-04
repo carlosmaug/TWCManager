@@ -853,8 +853,8 @@ class BackgroundTaskRunner:
 class TeslaCarApi:
     """Tesla Fleet API client used for wake and charge commands."""
     auth_url = 'https://fleet-auth.prd.vn.cloud.tesla.com/oauth2/v3/token'
-    default_audience = 'https://fleet-api.prd.na.vn.cloud.tesla.com'
-    default_fleet_api_base_url = 'https://fleet-api.prd.na.vn.cloud.tesla.com/api/1'
+    default_audience = 'https://fleet-api.prd.eu.vn.cloud.tesla.com'
+    default_fleet_api_base_url = 'https://fleet-api.prd.eu.vn.cloud.tesla.com/api/1'
 
     def __init__(self, config=None, token_store=None):
         self.config = config if config != None else TeslaApiConfig(
@@ -3609,11 +3609,28 @@ class TWCManagerApp:
                         numPackets = 0
                         if(webMsg == b'getStatus'):
                             needCarApiBearerToken = False
+                            teslaApiOperational = False
+                            teslaApiState = 'not_configured'
                             energy_periods = calculate_energy_periods(state.energyHistory, now)
                             if(tesla_car_api != None and tesla_car_api.has_tokens() == False):
                                 for i in range(0, len(state.slaveTWCRoundRobin)):
                                     if(state.slaveTWCRoundRobin[i].protocolVersion == 2):
                                         needCarApiBearerToken = True
+
+                            if(tesla_car_api != None):
+                                if(tesla_car_api.has_tokens() == False):
+                                    teslaApiState = (
+                                        'tokens_required' if needCarApiBearerToken else 'not_connected'
+                                    )
+                                elif(now - tesla_car_api.last_error_time
+                                     < tesla_car_api.error_retry_mins * 60):
+                                    teslaApiState = 'error'
+                                elif(tesla_car_api.bearer_token != ''
+                                     and tesla_car_api.token_expire_time > now):
+                                    teslaApiOperational = True
+                                    teslaApiState = 'operational'
+                                else:
+                                    teslaApiState = 'not_operational'
 
                             webResponseMsg = (
                                 "%.2f" % (state.maxAmpsToDivideAmongSlaves) +
@@ -3630,6 +3647,8 @@ class TWCManagerApp:
                                 '`' + "%02d:%02d" % (int(state.hourResumeTrackGreenEnergy),
                                                      int((state.hourResumeTrackGreenEnergy % 1) * 60)) +
                                 '`' + ('1' if needCarApiBearerToken else '0') +
+                                '`' + ('1' if teslaApiOperational else '0') +
+                                '`' + teslaApiState +
                                 '`' + str(int(max(0, state.chargeNowTimeEnd - now))) +
                                 '`' + ("%.3f" % (state.kWhDelivered)) +
                                 '`' + ("%.3f" % (energy_periods['today'])) +

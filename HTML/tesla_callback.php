@@ -17,7 +17,7 @@ declare(strict_types=1);
  */
 
 const TOKEN_URL = 'https://fleet-auth.prd.vn.cloud.tesla.com/oauth2/v3/token';
-const DEFAULT_AUDIENCE = 'https://fleet-api.prd.na.vn.cloud.tesla.com';
+const DEFAULT_AUDIENCE = 'https://fleet-api.prd.eu.vn.cloud.tesla.com';
 const DEFAULT_SCOPE = 'openid offline_access user_data vehicle_device_data vehicle_location vehicle_cmds vehicle_charging_cmds';
 const DOWNLOAD_FILE_NAME = 'TeslaApiTokens.json';
 
@@ -55,21 +55,28 @@ function current_url_base(): string
     return request_scheme() . '://' . $host . $path;
 }
 
-function load_config(): array
+function load_config(?string &$resetReason = null): array
 {
     $path = config_file_path();
     if (!is_file($path)) {
+        save_config([]);
+        $resetReason = 'Se creo un nuevo fichero de configuracion porque no existia.';
         return [];
     }
 
     $raw = file_get_contents($path);
     if ($raw === false) {
-        throw new RuntimeException('No se pudo leer el fichero de configuracion: ' . $path);
+        save_config([]);
+        $resetReason = 'Se creo un nuevo fichero de configuracion porque el anterior no se podia leer.';
+        return [];
     }
 
     $config = json_decode($raw, true);
     if (!is_array($config)) {
-        throw new RuntimeException('El fichero de configuracion contiene JSON invalido: ' . $path);
+        @rename($path, $path . '.invalid-' . date('YmdHis'));
+        save_config([]);
+        $resetReason = 'El fichero de configuracion contenia JSON invalido y se creo uno nuevo vacio.';
+        return [];
     }
 
     return $config;
@@ -371,8 +378,13 @@ $state = [
 
 try {
     $configExistedAtStart = is_file(config_file_path());
-    $state['config'] = load_config();
+    $configResetReason = null;
+    $state['config'] = load_config($configResetReason);
     $state['show_config_path'] = !$configExistedAtStart;
+    if ($configResetReason !== null) {
+        $state['message'] = $configResetReason;
+        $state['show_config_path'] = true;
+    }
 
     if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'save_config') {
         $config = [

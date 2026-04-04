@@ -389,6 +389,8 @@ function parse_status_response($response)
         'scheduled_days_bitmap' => 0,
         'resume_track_green_energy_time' => '-1:00',
         'need_tesla_tokens' => false,
+        'tesla_api_operational' => false,
+        'tesla_api_state' => 'unknown',
         'charge_now_remaining_seconds' => 0,
         'kwh_delivered' => 0,
         'energy_today_kwh' => 0,
@@ -404,7 +406,7 @@ function parse_status_response($response)
     }
 
     $parts = explode('`', $response);
-    if(count($parts) < 18) {
+    if(count($parts) < 20) {
         return $defaults;
     }
 
@@ -423,6 +425,8 @@ function parse_status_response($response)
     $status['scheduled_days_bitmap'] = clamp_int((int)$parts[$idx++], 0, 127);
     $status['resume_track_green_energy_time'] = validate_time_value((string)$parts[$idx++], true) ?? '-1:00';
     $status['need_tesla_tokens'] = ($parts[$idx++] === '1');
+    $status['tesla_api_operational'] = ($parts[$idx++] === '1');
+    $status['tesla_api_state'] = preg_replace('/[^a-z_]/', '', strtolower((string)$parts[$idx++])) ?: 'unknown';
     $status['charge_now_remaining_seconds'] = max(0, (int)$parts[$idx++]);
     $status['kwh_delivered'] = max(0, (float)$parts[$idx++]);
     $status['energy_today_kwh'] = max(0, (float)$parts[$idx++]);

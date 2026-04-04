@@ -89,6 +89,119 @@ You can override that with:
 This helper is useful when you want a simple browser flow to generate the token
 JSON that `TWCManager.py` loads from disk.
 
+## Renewing Tesla Tokens Step By Step
+
+Use this procedure when:
+
+- the main UI shows `Tesla API not operative`
+- the Python log says `Failed to refresh Tesla API token`
+- the Python log says `Import a new token set generated with MFA`
+
+What you need to prepare in Tesla before opening the helper:
+
+1. Open the Tesla developer portal:
+
+```text
+https://developer.tesla.com/
+```
+
+2. Sign in and open the app dashboard / application area:
+
+```text
+https://developer.tesla.com/dashboard
+```
+
+3. If you do not yet have an approved app, start from Tesla's Fleet API onboarding guide:
+
+```text
+https://developer.tesla.com/docs/fleet-api/getting-started/what-is-fleet-api
+```
+
+4. Create or open a Tesla developer application for OAuth / Fleet API access.
+5. Register the exact callback URL that will be served by your TWCManager host.
+   Example:
+
+```text
+https://twcmanager.local/tesla_callback.php
+```
+
+6. Make sure the callback URL registered in Tesla exactly matches the real browser URL.
+   `http` vs `https`, hostname, port, path, and trailing slash must match exactly.
+7. Copy these values from the Tesla developer app:
+   - `client_id`
+   - `client_secret`
+8. Use the audience expected by this project unless you intentionally need a different Tesla region:
+
+```text
+https://fleet-api.prd.eu.vn.cloud.tesla.com
+```
+
+9. Use scopes that allow token refresh plus vehicle data and charging commands.
+   The helper defaults to:
+
+```text
+openid offline_access user_data vehicle_device_data vehicle_location vehicle_cmds vehicle_charging_cmds
+```
+
+Recommended flow:
+
+1. Open:
+
+```text
+http://twcmanager.local/tesla_callback.php
+```
+
+2. Save the Tesla OAuth app settings from your Tesla developer app:
+   - `client_id`
+   - `client_secret`
+   - `redirect_uri`
+   - `audience`
+   - `scope`
+
+3. Verify that the `redirect_uri` stored in the form exactly matches the redirect URI registered in Tesla.
+   Differences in scheme, hostname, port, path, or trailing slash will cause the callback exchange to fail.
+
+4. Click `Abrir login Tesla`.
+
+5. Log in to Tesla and complete MFA if Tesla requests it.
+
+6. Wait for Tesla to redirect the browser back to `tesla_callback.php`.
+
+7. Confirm that the page displays:
+
+```text
+TeslaApiTokens.json generado correctamente.
+```
+
+8. Download the generated `TeslaApiTokens.json`.
+
+9. Copy that file to the directory that contains `TWCManager.py`.
+   Typical path:
+
+```text
+/srv/TWCManager/TeslaApiTokens.json
+```
+
+10. Make sure the user running `TWCManager.py` can read the file.
+
+11. Restart `TWCManager.py`.
+
+12. Open the main web UI again and confirm the Tesla status badge is green.
+
+What success looks like:
+
+- the Python process logs `Tesla API tokens imported`
+- charging commands no longer fail on token refresh
+- the Tesla status badge changes from red to green
+
+Common failure cases:
+
+- the token JSON was generated on your browser but never placed on the server
+- the file was copied to the wrong TWCManager installation directory
+- the callback URL does not match the Tesla app configuration exactly
+- the Python service cannot read the file because of permissions
+- the OAuth app configuration is incomplete or incorrect
+
 ## Dependencies
 
 For `index.php`:

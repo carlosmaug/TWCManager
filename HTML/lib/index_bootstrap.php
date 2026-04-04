@@ -257,23 +257,38 @@ $teslaTokenCandidates = array(
 $teslaTokenPath = first_readable_file($teslaTokenCandidates);
 $teslaTokensAvailable = ($teslaTokenPath !== '');
 
-if($status['need_tesla_tokens']) {
+if($status['tesla_api_operational']) {
+    $teslaConnectionClass = 'good';
+    $teslaConnectionText = 'Tesla API operative';
+    $teslaConnectionDetail = 'The backend has a valid in-memory Tesla API session and no recent Tesla API errors.';
+}
+elseif($status['tesla_api_state'] === 'error') {
     $teslaConnectionClass = '';
-    $teslaConnectionText = 'Tesla disconnected';
+    $teslaConnectionText = 'Tesla API not operative';
+    $teslaConnectionDetail = 'The backend reported a recent Tesla API error, such as a failed token refresh or rejected Tesla API request.';
+}
+elseif($status['need_tesla_tokens'] || $status['tesla_api_state'] === 'tokens_required') {
+    $teslaConnectionClass = '';
+    $teslaConnectionText = 'Tesla API not operative';
     $teslaConnectionDetail = 'The backend reports that Tesla API access is needed, but no usable tokens are loaded.';
 }
+elseif($status['tesla_api_state'] === 'not_operational') {
+    $teslaConnectionClass = '';
+    $teslaConnectionText = 'Tesla API not operative';
+    $teslaConnectionDetail = 'Tesla tokens are loaded, but there is no currently valid access token in memory.';
+}
 elseif($teslaTokensAvailable) {
-    $teslaConnectionClass = 'good';
-    $teslaConnectionText = 'Tesla connected';
-    $teslaConnectionDetail = 'A readable TeslaApiTokens.json file is present for TWCManager.';
+    $teslaConnectionClass = '';
+    $teslaConnectionText = 'Tesla API not operative';
+    $teslaConnectionDetail = 'A TeslaApiTokens.json file exists, but the backend has not confirmed an operational Tesla API session.';
 }
 elseif($teslaConfigAvailable) {
     $teslaConnectionClass = '';
-    $teslaConnectionText = 'Tesla not connected';
+    $teslaConnectionText = 'Tesla API not operative';
     $teslaConnectionDetail = 'OAuth is configured, but no readable TeslaApiTokens.json file was found yet.';
 }
 else {
     $teslaConnectionClass = '';
-    $teslaConnectionText = 'Tesla not configured';
+    $teslaConnectionText = 'Tesla API not operative';
     $teslaConnectionDetail = 'No OAuth helper configuration or Tesla token file was found on this host.';
 }
