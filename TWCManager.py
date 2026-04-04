@@ -221,6 +221,9 @@ background_task_runner = None
 tesla_car_api = None
 rs485_transport = None
 web_ipc_server = None
+log_output_stream = None
+original_stdout = sys.stdout
+original_stderr = sys.stderr
 # These module-level service references are kept for compatibility with the
 # original script layout. New code should treat them as process singletons.
 
@@ -230,6 +233,7 @@ class GeneralConfig:
     """General process configuration not tied to a single subsystem."""
     debug_level: int
     display_milliseconds: bool
+    log_file: str
     fake_master: int
     fake_twc_id: bytearray
     master_sign: bytearray
@@ -382,6 +386,7 @@ class SettingsStore:
             ('greenEnergyAmpsOffset', float),
             ('debugLevel', int),
             ('displayMilliseconds', parse_bool),
+            ('logFile', str),
             ('fakeMaster', int),
             ('fakeTWCID', lambda value: parse_hex_bytes(value, 2)),
             ('masterSign', lambda value: parse_hex_bytes(value, 1)),
@@ -393,6 +398,7 @@ class SettingsStore:
             ('scheduledAmpsEndHour', float),
             ('scheduledAmpsDaysBitmap', int),
             ('hourResumeTrackGreenEnergy', float),
+            ('greenEnergyRateLimitedUntil', float),
             ('kWhDelivered', float),
             ('homeLat', float),
             ('homeLon', float),
@@ -508,6 +514,11 @@ debugLevel={debugLevel}
 # Example: true
 displayMilliseconds={displayMilliseconds}
 
+# Log destination file. Leave blank to keep logging on the console.
+# Example:
+#   /var/log/twcmanager.log
+logFile={logFile}
+
 # Operating mode on the RS-485 bus.
 # Values:
 #   1 -> emulate a master Wall Connector and control slaves
@@ -575,6 +586,11 @@ scheduledAmpsDaysBitmap={scheduledAmpsDaysBitmap}
 #   8.0  -> resume at 08:00 every day
 hourResumeTrackGreenEnergy={hourResumeTrackGreenEnergy}
 
+# Unix timestamp until which solar telemetry requests are locally suppressed
+# after the upstream API asks us to back off. This is runtime state that may be
+# updated automatically.
+greenEnergyRateLimitedUntil={greenEnergyRateLimitedUntil}
+
 # Accumulated delivered energy counter in kWh.
 # This is persistent state, not a tuning parameter. TWCManager updates it over
 # time so the value survives restarts.
@@ -602,6 +618,7 @@ homeLon={homeLon}
             greenEnergyAmpsOffset=settings['greenEnergyAmpsOffset'],
             debugLevel=int(settings['debugLevel']),
             displayMilliseconds=format_bool(settings['displayMilliseconds']),
+            logFile=settings['logFile'],
             fakeMaster=int(settings['fakeMaster']),
             fakeTWCID=format_hex_bytes(settings['fakeTWCID']),
             masterSign=format_hex_bytes(settings['masterSign']),
@@ -613,6 +630,7 @@ homeLon={homeLon}
             scheduledAmpsEndHour=settings['scheduledAmpsEndHour'],
             scheduledAmpsDaysBitmap=int(settings['scheduledAmpsDaysBitmap']),
             hourResumeTrackGreenEnergy=settings['hourResumeTrackGreenEnergy'],
+            greenEnergyRateLimitedUntil=settings['greenEnergyRateLimitedUntil'],
             kWhDelivered=settings['kWhDelivered'],
             homeLat=settings['homeLat'],
             homeLon=settings['homeLon'],
@@ -755,9 +773,26 @@ class GreenEnergyMonitor:
         self.lock = lock
         self.state = state
         self.url = 'https://www.eu.solaxcloud.com:9443/proxy/api/getRealtimeInfo.do?tokenId=202109170145029163555411&sn=SPRBG2GRWG'
+        self.rate_limited_until = max(0.0, float(
+            getattr(state, 'greenEnergyRateLimitedUntil', 0.0)
+        ))
+
+    def _parse_rate_limit_delay(self, payload):
+        code = payload.get('code')
+        exception_text = str(payload.get('exception', ''))
+        match = re.search(r'suspend the request for\s+(\d+)\s+minutes?', exception_text, re.IGNORECASE)
+        if(match):
+            return max(60, int(match.group(1)) * 60)
+        if(code == 104):
+            return 60
+        return 5 * 60
 
     def check(self):
         global debugLevel, maxAmpsToDivideAmongSlaves
+
+        now = time.time()
+        if(now < self.rate_limited_until):
+            return
 
         try:
             resp = requests.get(self.url, timeout=30)
@@ -769,6 +804,16 @@ class GreenEnergyMonitor:
             greenEnergyData = resp.json()
         except Exception:
             print(time_now() + " ERROR: no json response " + str(resp.raw))
+            return
+
+        if(greenEnergyData.get('code') in (3, 104)):
+            delay_seconds = self._parse_rate_limit_delay(greenEnergyData)
+            self.rate_limited_until = max(self.rate_limited_until, now + delay_seconds)
+            if(self.state != None):
+                self.state.greenEnergyRateLimitedUntil = self.rate_limited_until
+                save_settings(self.state)
+            print(time_now() + " WARNING: Solar telemetry API rate limit reached. "
+                  + "Pausing new telemetry requests for %d seconds." % delay_seconds)
             return
 
         if(greenEnergyData.get('exception') != "Query success!"):
@@ -787,6 +832,11 @@ class GreenEnergyMonitor:
 
         if(solarW < 0):
             solarW = 0
+
+        self.rate_limited_until = 0
+        if(self.state != None and self.state.greenEnergyRateLimitedUntil != 0):
+            self.state.greenEnergyRateLimitedUntil = 0
+            save_settings(self.state)
 
         with self.lock:
             maxAmpsToDivideAmongSlaves = int(solarW / 240) + self.config.green_energy_amps_offset
@@ -1410,15 +1460,96 @@ class WebIPCServer:
     def send(self, payload, block=False):
         self.queue.send(payload, block=block)
 
+
+def configure_log_output(general_config=None):
+    global logFileName, log_output_stream
+
+    target_file = logFileName
+    if(general_config != None):
+        target_file = general_config.log_file
+
+    if(target_file == None):
+        target_file = ''
+    target_file = str(target_file).strip()
+
+    if(target_file == ''):
+        if(log_output_stream != None):
+            try:
+                log_output_stream.close()
+            except OSError:
+                pass
+            log_output_stream = None
+        sys.stdout = original_stdout
+        sys.stderr = original_stderr
+        if(general_config != None):
+            general_config.log_file = ''
+        logFileName = ''
+        return
+
+    try:
+        log_stream = open(target_file, 'a', buffering=1)
+    except OSError as exc:
+        sys.stdout = original_stdout
+        sys.stderr = original_stderr
+        print(time_now() + ': ERROR: Cannot open log file ' + target_file
+              + '. Logging will continue on the console. ' + str(exc),
+              file=original_stderr)
+        if(log_output_stream != None):
+            try:
+                log_output_stream.close()
+            except OSError:
+                pass
+            log_output_stream = None
+        if(general_config != None):
+            general_config.log_file = ''
+        logFileName = ''
+        return
+
+    if(log_output_stream != None):
+        try:
+            log_output_stream.close()
+        except OSError:
+            pass
+
+    log_output_stream = log_stream
+    sys.stdout = log_stream
+    sys.stderr = log_stream
+    if(general_config != None):
+        general_config.log_file = target_file
+    logFileName = target_file
+
+
+def parse_web_ipc_message(raw_msg):
+    """Return (command, metadata) from an IPC payload sent by the web UI."""
+    metadata = {}
+    command = raw_msg
+
+    if(raw_msg[0:9] == b'__meta__='):
+        newline_pos = raw_msg.find(b'\n')
+        if(newline_pos != -1):
+            meta_payload = raw_msg[9:newline_pos]
+            command = raw_msg[newline_pos + 1:]
+            try:
+                decoded = json.loads(meta_payload.decode('utf-8'))
+                if(isinstance(decoded, dict)):
+                    metadata = decoded
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                metadata = {}
+
+    return command, metadata
+
+
 def load_settings(state=None, api=None, api_config=None, general_config=None,
                   energy_config=None, rs485_config=None):
     global debugLevel, displayMilliseconds, fakeMaster, fakeTWCID, masterSign, \
            slaveSign, rs485Adapter, baud, wiringMaxAmpsAllTWCs, \
            wiringMaxAmpsPerTWC, minAmpsPerTWC, minAmpsTWCSupports, \
            greenEnergyAmpsOffset, onlyChargeMultiCarsAtHome, settingsFileName, \
+           logFileName, \
            nonScheduledAmpsMax, scheduledAmpsMax, \
            scheduledAmpsStartHour, scheduledAmpsEndHour, \
-           scheduledAmpsDaysBitmap, hourResumeTrackGreenEnergy, kWhDelivered, \
+           scheduledAmpsDaysBitmap, hourResumeTrackGreenEnergy, \
+           greenEnergyRateLimitedUntil, kWhDelivered, \
            homeLat, homeLon
 
     if(settings_store == None):
@@ -1434,6 +1565,7 @@ def load_settings(state=None, api=None, api_config=None, general_config=None,
     greenEnergyAmpsOffset = settings.get('greenEnergyAmpsOffset', greenEnergyAmpsOffset)
     debugLevel = settings.get('debugLevel', debugLevel)
     displayMilliseconds = settings.get('displayMilliseconds', displayMilliseconds)
+    logFileName = settings.get('logFile', logFileName)
     fakeMaster = settings.get('fakeMaster', fakeMaster)
     fakeTWCID = settings.get('fakeTWCID', fakeTWCID)
     masterSign = settings.get('masterSign', masterSign)
@@ -1445,12 +1577,14 @@ def load_settings(state=None, api=None, api_config=None, general_config=None,
     scheduledAmpsEndHour = settings.get('scheduledAmpsEndHour', scheduledAmpsEndHour)
     scheduledAmpsDaysBitmap = settings.get('scheduledAmpsDaysBitmap', scheduledAmpsDaysBitmap)
     hourResumeTrackGreenEnergy = settings.get('hourResumeTrackGreenEnergy', hourResumeTrackGreenEnergy)
+    greenEnergyRateLimitedUntil = settings.get('greenEnergyRateLimitedUntil', greenEnergyRateLimitedUntil)
     kWhDelivered = settings.get('kWhDelivered', kWhDelivered)
     homeLat = settings.get('homeLat', homeLat)
     homeLon = settings.get('homeLon', homeLon)
     if(general_config != None):
         general_config.debug_level = debugLevel
         general_config.display_milliseconds = displayMilliseconds
+        general_config.log_file = logFileName
         general_config.fake_master = fakeMaster
         general_config.fake_twc_id = fakeTWCID
         general_config.master_sign = masterSign
@@ -1471,6 +1605,7 @@ def load_settings(state=None, api=None, api_config=None, general_config=None,
         state.scheduledAmpsEndHour = scheduledAmpsEndHour
         state.scheduledAmpsDaysBitmap = scheduledAmpsDaysBitmap
         state.hourResumeTrackGreenEnergy = hourResumeTrackGreenEnergy
+        state.greenEnergyRateLimitedUntil = greenEnergyRateLimitedUntil
         state.kWhDelivered = kWhDelivered
     if(api_config != None):
         api_config.home_lat = homeLat
@@ -1481,9 +1616,11 @@ def save_settings(state=None, api=None, api_config=None):
            slaveSign, rs485Adapter, baud, wiringMaxAmpsAllTWCs, \
            wiringMaxAmpsPerTWC, minAmpsPerTWC, minAmpsTWCSupports, \
            greenEnergyAmpsOffset, onlyChargeMultiCarsAtHome, settingsFileName, \
+           logFileName, \
            nonScheduledAmpsMax, scheduledAmpsMax, \
            scheduledAmpsStartHour, scheduledAmpsEndHour, \
-           scheduledAmpsDaysBitmap, hourResumeTrackGreenEnergy, kWhDelivered, \
+           scheduledAmpsDaysBitmap, hourResumeTrackGreenEnergy, \
+           greenEnergyRateLimitedUntil, kWhDelivered, \
            homeLat, homeLon
 
     if(settings_store == None):
@@ -1496,6 +1633,7 @@ def save_settings(state=None, api=None, api_config=None):
         scheduledAmpsEndHour = state.scheduledAmpsEndHour
         scheduledAmpsDaysBitmap = state.scheduledAmpsDaysBitmap
         hourResumeTrackGreenEnergy = state.hourResumeTrackGreenEnergy
+        greenEnergyRateLimitedUntil = state.greenEnergyRateLimitedUntil
         kWhDelivered = state.kWhDelivered
     if(api == None):
         api = tesla_car_api
@@ -1514,6 +1652,7 @@ def save_settings(state=None, api=None, api_config=None):
         'greenEnergyAmpsOffset': greenEnergyAmpsOffset,
         'debugLevel': debugLevel,
         'displayMilliseconds': displayMilliseconds,
+        'logFile': logFileName,
         'fakeMaster': fakeMaster,
         'fakeTWCID': fakeTWCID,
         'masterSign': masterSign,
@@ -1525,6 +1664,7 @@ def save_settings(state=None, api=None, api_config=None):
         'scheduledAmpsEndHour': scheduledAmpsEndHour,
         'scheduledAmpsDaysBitmap': scheduledAmpsDaysBitmap,
         'hourResumeTrackGreenEnergy': hourResumeTrackGreenEnergy,
+        'greenEnergyRateLimitedUntil': greenEnergyRateLimitedUntil,
         'kWhDelivered': kWhDelivered,
         'homeLat': homeLat,
         'homeLon': homeLon,
@@ -3369,6 +3509,7 @@ chargeNowTimeEnd   = 0
 spikeAmpsToCancel6ALimit   = 16
 timeLastGreenEnergyCheck   = 0
 hourResumeTrackGreenEnergy = -1
+greenEnergyRateLimitedUntil = 0
 kWhDelivered               = 119
 timeLastkWhDelivered       = time.time()
 timeLastkWhSaved           = time.time()
@@ -3378,6 +3519,7 @@ timeLastkWhSaved           = time.time()
 # TWCManagerSettings.txt in the same directory as the script even when pwd does
 # not match the script directory.
 settingsFileName = re.sub(r'/[^/]+$', r'/TWCManagerSettings.txt', __file__)
+logFileName = '/var/log/twcmanager.log'
 # Tesla API tokens live in a separate JSON file to avoid mixing secrets with
 # ordinary runtime settings. Set TESLA_API_TOKEN_FILE to override this path.
 # Expected JSON keys: access_token, refresh_token, expires_at (unix timestamp).
@@ -3446,6 +3588,7 @@ class RuntimeState:
         self.spikeAmpsToCancel6ALimit = 16
         self.timeLastGreenEnergyCheck = 0
         self.hourResumeTrackGreenEnergy = -1
+        self.greenEnergyRateLimitedUntil = 0
         self.greenEnergyAvailableAmps = 0.0
         self.kWhDelivered = 119
         self.timeLastkWhDelivered = time.time()
@@ -3472,6 +3615,7 @@ class TWCManagerApp:
         self.general_config = GeneralConfig(
             debug_level=debugLevel,
             display_milliseconds=displayMilliseconds,
+            log_file=logFileName,
             fake_master=fakeMaster,
             fake_twc_id=fakeTWCID,
             master_sign=masterSign,
@@ -3510,6 +3654,7 @@ class TWCManagerApp:
             self.energy_config,
             self.rs485_config,
         )
+        configure_log_output(self.general_config)
         tesla_car_api.load_tokens()
         green_energy_monitor = GreenEnergyMonitor(self.energy_config, backgroundTasksLock, self.state)
         background_task_runner = BackgroundTaskRunner(
@@ -3597,14 +3742,19 @@ class TWCManagerApp:
                         webMsgTime = unpacked[0]
                         webMsgID = unpacked[1]
                         webMsg = webMsgRaw[0][6:len(webMsgRaw[0])]
+                        webMsg, webMsgMeta = parse_web_ipc_message(webMsg)
 
                         if(general_config.debug_level >= 1):
                             webMsgRedacted = webMsg
                             m = re.search(b'^(carApiTokens=)', webMsg, re.MULTILINE)
                             if(m):
                                 webMsgRedacted = m.group(1) + b'[HIDDEN]'
-                            print(time_now() + ": Web query: '" + str(webMsgRedacted) + "', id " + str(webMsgID) +
-                                               ", time " + str(webMsgTime) + ", type " + str(webMsgType))
+                            command_label = webMsgRedacted.decode('utf-8', 'replace')
+                            client_addr = str(webMsgMeta.get('client', '')).strip()
+                            if(client_addr == ''):
+                                client_addr = 'unknown'
+                            print(time_now() + ': Web: client=' + client_addr
+                                               + ', command=' + command_label)
                         webResponseMsg = ''
                         numPackets = 0
                         if(webMsg == b'getStatus'):

@@ -160,6 +160,45 @@ function validate_debug_token($value, $maxLength = 64)
     return $value;
 }
 
+function get_request_client_address()
+{
+    foreach([
+        'HTTP_X_FORWARDED_FOR',
+        'HTTP_X_REAL_IP',
+        'REMOTE_ADDR',
+    ] as $key) {
+        if(empty($_SERVER[$key])) {
+            continue;
+        }
+
+        $value = trim((string)$_SERVER[$key]);
+        if($value === '') {
+            continue;
+        }
+
+        if($key === 'HTTP_X_FORWARDED_FOR') {
+            $parts = explode(',', $value);
+            $value = trim((string)$parts[0]);
+            if($value === '') {
+                continue;
+            }
+        }
+
+        return $value;
+    }
+
+    return 'unknown';
+}
+
+function build_ipc_message($command)
+{
+    $metadata = [
+        'client' => get_request_client_address(),
+    ];
+
+    return '__meta__=' . json_encode($metadata) . "\n" . $command;
+}
+
 function ipc_send($ipcMsgTime, $ipcMsgID, $ipcMsg, $ipcMsgType = 2)
 {
     global $ipcQueue, $debugLevel;
@@ -180,7 +219,7 @@ function ipc_send($ipcMsgTime, $ipcMsgID, $ipcMsg, $ipcMsgType = 2)
 
 function ipc_command($command)
 {
-    return ipc_send(time(), 0, $command, 2);
+    return ipc_send(time(), 0, build_ipc_message($command), 2);
 }
 
 function ipc_query($command, $usePackets = false)
@@ -189,7 +228,7 @@ function ipc_query($command, $usePackets = false)
 
     $ipcMsgID = rand(1, 65535);
     $ipcMsgTime = time();
-    if(ipc_send($ipcMsgTime, $ipcMsgID, $command, 2) == false) {
+    if(ipc_send($ipcMsgTime, $ipcMsgID, build_ipc_message($command), 2) == false) {
         return '';
     }
 

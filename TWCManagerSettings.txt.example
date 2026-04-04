@@ -68,6 +68,11 @@ debugLevel=2
 # Example: true
 displayMilliseconds=false
 
+# Log destination file. Leave blank to keep logging on the console.
+# Default suggestion:
+#   /var/log/twcmanager.log
+logFile=/var/log/twcmanager.log
+
 # Operating mode on the RS-485 bus.
 # Values:
 #   1 -> emulate a master Wall Connector and control slaves
@@ -134,6 +139,11 @@ scheduledAmpsDaysBitmap=127
 #   -1   -> disabled
 #   8.0  -> resume at 08:00 every day
 hourResumeTrackGreenEnergy=-1.0
+
+# Unix timestamp until which solar telemetry requests are temporarily paused
+# after an upstream rate-limit response. This is runtime state and is normally
+# managed automatically by TWCManager.
+greenEnergyRateLimitedUntil=0
 
 # Accumulated delivered energy counter in kWh.
 # This is persistent state, not a tuning parameter. TWCManager updates it over
