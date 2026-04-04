@@ -242,7 +242,8 @@ function handle_login_submission($title = 'TWCManager Login')
                 $_SESSION['session_started_at'] = time();
                 $_SESSION['last_activity_at'] = time();
                 security_log('login_success', ['username' => $username]);
-                return;
+                header('Location: ' . current_request_uri());
+                exit;
             }
             record_login_attempt();
             security_log('login_failed', ['username' => $username]);
@@ -261,6 +262,16 @@ function current_request_path()
         $path = basename((string)($_SERVER['SCRIPT_NAME'] ?? 'index.php'));
     }
     return $path;
+}
+
+function current_request_uri()
+{
+    $uri = trim((string)($_SERVER['REQUEST_URI'] ?? ''));
+    if($uri !== '') {
+        return $uri;
+    }
+
+    return current_request_path();
 }
 
 function handle_logout_submission($redirectPath = '')
@@ -519,9 +530,26 @@ function canonical_base_url()
     return $scheme . '://' . $host;
 }
 
+function set_ipc_error($message)
+{
+    $GLOBALS['ipcLastError'] = trim((string)$message);
+}
+
+function get_ipc_error()
+{
+    return trim((string)($GLOBALS['ipcLastError'] ?? ''));
+}
+
 function ipc_send($ipcMsgTime, $ipcMsgID, $ipcMsg, $ipcMsgType = 2)
 {
     global $ipcQueue, $debugLevel;
+
+    if(!is_resource($ipcQueue) && !($ipcQueue instanceof \SysvMessageQueue)) {
+        if(get_ipc_error() === '') {
+            set_ipc_error('SysV IPC queue is not initialized.');
+        }
+        return false;
+    }
 
     if($debugLevel >= 10) {
         print "ipcQuery sending '" . h($ipcMsg) . "', id " . $ipcMsgID
@@ -532,8 +560,10 @@ function ipc_send($ipcMsgTime, $ipcMsgID, $ipcMsg, $ipcMsgType = 2)
     if(msg_send($ipcQueue, $ipcMsgType, pack("LSa*", $ipcMsgTime, $ipcMsgID, $ipcMsg),
                 false, false, $ipcErrorCode) == false
     ) {
+        set_ipc_error('msg_send failed with error code ' . $ipcErrorCode . '.');
         return false;
     }
+    set_ipc_error('');
     return true;
 }
 
@@ -558,6 +588,7 @@ function ipc_query($command, $usePackets = false)
     $maxRetries = 50;
     $numPackets = 0;
     $msgResult = '';
+    $receiveErrorCode = 0;
 
     for($i = 0; $i < $maxRetries; $i++) {
         $ipcErrorCode = 0;
@@ -566,6 +597,9 @@ function ipc_query($command, $usePackets = false)
         ) {
             if($ipcErrorCode != 42 && $debugLevel >= 1) {
                 print("Message receive failed with error code $ipcErrorCode<br>");
+            }
+            if($ipcErrorCode != 42) {
+                $receiveErrorCode = $ipcErrorCode;
             }
         }
         else {
@@ -584,12 +618,14 @@ function ipc_query($command, $usePackets = false)
                         $msgResult .= $aryMsg['msg'];
                         $numPackets--;
                         if($numPackets == 0) {
+                            set_ipc_error('');
                             return $msgResult;
                         }
                     }
                     continue;
                 }
 
+                set_ipc_error('');
                 return $aryMsg['msg'];
             }
 
@@ -601,6 +637,12 @@ function ipc_query($command, $usePackets = false)
         usleep(100000);
     }
 
+    if($receiveErrorCode > 0) {
+        set_ipc_error('Timed out waiting for IPC response after msg_receive error code ' . $receiveErrorCode . '.');
+    }
+    elseif(get_ipc_error() === '') {
+        set_ipc_error('Timed out waiting for IPC response.');
+    }
     return '';
 }
 

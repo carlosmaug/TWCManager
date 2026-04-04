@@ -9,8 +9,32 @@ handle_login_submission('TWCManager Control Panel');
 enforce_session_timeout('TWCManager Control Panel');
 handle_logout_submission();
 
-$ipcKey = ftok($twcScriptDir, "T");
-$ipcQueue = msg_get_queue($ipcKey, 0660);
+$ipcQueue = null;
+set_ipc_error('');
+
+if(!function_exists('ftok') || !function_exists('msg_get_queue')
+   || !function_exists('msg_send') || !function_exists('msg_receive')
+) {
+    set_ipc_error('PHP SysV IPC support is not available. Enable the sysvmsg extension.');
+}
+elseif(!is_string($twcScriptDir) || trim($twcScriptDir) === '') {
+    set_ipc_error('The configured $twcScriptDir is empty.');
+}
+elseif(!is_dir($twcScriptDir) && !is_file($twcScriptDir)) {
+    set_ipc_error('The configured $twcScriptDir path does not exist: ' . $twcScriptDir);
+}
+else {
+    $ipcKey = @ftok($twcScriptDir, "T");
+    if($ipcKey === false || $ipcKey === -1) {
+        set_ipc_error('ftok failed for $twcScriptDir: ' . $twcScriptDir);
+    }
+    else {
+        $ipcQueue = @msg_get_queue($ipcKey, 0660);
+        if($ipcQueue === false) {
+            set_ipc_error('msg_get_queue failed for IPC key ' . $ipcKey . '.');
+        }
+    }
+}
 
 $pageMode = 'normal';
 $flashMessage = '';
@@ -258,6 +282,7 @@ $sendMessageUrl = $webEnableDebugTools ? page_url(array('sendTWCMsg' => '')) : '
 $heartbeatUrl = $webEnableDebugTools ? page_url(array('setMasterHeartbeatData' => '')) : '';
 $dumpStateUrl = $webEnableDebugTools ? page_url(array('dumpState' => 1)) : '';
 $statusValid = $status['valid'];
+$statusError = get_ipc_error();
 $backendBadgeClass = $statusValid ? 'good' : '';
 $backendBadgeText = $statusValid ? 'Backend reachable' : 'Backend unavailable';
 $availableAmpsDisplay = available_power_display($status['available_amps']);

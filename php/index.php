@@ -576,7 +576,14 @@
     <?php endif; ?>
 
     <?php if(!$statusValid): ?>
-    <div class="flash error">No valid status response was received from TWCManager. Verify that the Python process is running, that <code>$twcScriptDir</code> is correct, and that PHP can access the SysV IPC queue.</div>
+    <div class="flash error">
+        No valid status response was received from TWCManager.
+        <?php if($statusError !== ''): ?>
+        <?=h($statusError)?>
+        <?php else: ?>
+        Verify that the Python process is running, that <code>$twcScriptDir</code> is correct, and that PHP can access the SysV IPC queue.
+        <?php endif; ?>
+    </div>
     <?php endif; ?>
 
     <?php if($pageMode === 'debug'): ?>
