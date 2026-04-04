@@ -1821,7 +1821,9 @@ def unescape_msg(msg:bytearray, msgLen):
     # Given a message received on the RS485 network, remove leading and trailing
     # C0 byte, unescape special byte values, and verify its data matches the CRC
     # byte.
-    msg = msg[0:msgLen]
+    # Some read paths may hand us immutable bytes. Work on a mutable copy
+    # because the unescape logic rewrites the buffer in place.
+    msg = bytearray(msg[0:msgLen])
 
     # See notes in send_msg() for the way certain bytes in messages are escaped.
     # We basically want to change db dc into c0 and db dd into db.
@@ -3814,7 +3816,7 @@ class TWCManagerApp:
                             print("Found end of message before full-length message received.  " \
                                   "Discard and wait for new message.")
 
-                        state.msg = data
+                        state.msg = bytearray(data)
                         state.msgLen = 1
                         continue
 
