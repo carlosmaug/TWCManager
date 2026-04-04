@@ -1,6 +1,23 @@
 <?php
 declare(strict_types=1);
 
+require_once __DIR__ . '/lib/load_config.php';
+require_once __DIR__ . '/lib/functions.php';
+
+start_secure_session();
+send_security_headers();
+handle_login_submission('Tesla OAuth Helper');
+enforce_session_timeout('Tesla OAuth Helper');
+handle_logout_submission('tesla_callback.php');
+
+if(empty($webEnableTeslaHelper)) {
+    security_log('tesla_helper_blocked');
+    http_response_code(403);
+    header('Content-Type: text/plain; charset=utf-8');
+    echo "Tesla OAuth helper is disabled.\n";
+    exit;
+}
+
 /**
  * Tesla OAuth callback helper for Apache/PHP deployments.
  *
@@ -31,11 +48,6 @@ function config_file_path(): string
     return dirname(__DIR__) . '/tesla_oauth_config.json';
 }
 
-function h(string $value): string
-{
-    return htmlspecialchars($value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
-}
-
 function request_scheme(): string
 {
     if (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') {
@@ -50,9 +62,25 @@ function request_scheme(): string
 
 function current_url_base(): string
 {
-    $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
     $path = strtok($_SERVER['REQUEST_URI'] ?? '/', '?');
-    return request_scheme() . '://' . $host . $path;
+    return canonical_base_url() . $path;
+}
+
+function oauth_state_token(): string
+{
+    start_secure_session();
+    if(empty($_SESSION['tesla_oauth_state']) || !is_string($_SESSION['tesla_oauth_state'])) {
+        $_SESSION['tesla_oauth_state'] = bin2hex(random_bytes(24));
+    }
+    return $_SESSION['tesla_oauth_state'];
+}
+
+function consume_oauth_state_token(): string
+{
+    start_secure_session();
+    $state = (string)($_SESSION['tesla_oauth_state'] ?? '');
+    unset($_SESSION['tesla_oauth_state']);
+    return $state;
 }
 
 function load_config(?string &$resetReason = null): array
@@ -271,6 +299,11 @@ code {
   <div class="card">
     <h1>Tesla OAuth Helper</h1>
     <p class="muted">Esta pagina guarda la configuracion OAuth, recibe la callback de Tesla y genera <code><?php echo h(DOWNLOAD_FILE_NAME); ?></code> listo para usar con TWCManager.</p>
+    <form method="post">
+      <?php echo csrf_input(); ?>
+      <input type="hidden" name="action" value="logout">
+      <div class="actions"><button type="submit">Cerrar sesion</button></div>
+    </form>
     <?php if ($showConfigPath): ?>
     <p class="muted">Fichero de configuracion: <code><?php echo h($configPath); ?></code></p>
     <?php endif; ?>
@@ -289,6 +322,7 @@ code {
   <div class="card">
     <h2>Configuracion OAuth</h2>
     <form method="post">
+      <?php echo csrf_input(); ?>
       <input type="hidden" name="action" value="save_config">
       <label for="client_id">Client ID</label>
       <input id="client_id" name="client_id" required value="<?php echo h((string) ($config['client_id'] ?? '')); ?>">
@@ -325,7 +359,7 @@ code {
               'redirect_uri' => $config['redirect_uri'] ?? $defaultRedirect,
               'response_type' => 'code',
               'scope' => $config['scope'] ?? DEFAULT_SCOPE,
-              'state' => bin2hex(random_bytes(12)),
+              'state' => oauth_state_token(),
               'nonce' => bin2hex(random_bytes(12)),
           ]);
     ?>
@@ -377,6 +411,7 @@ $state = [
 ];
 
 try {
+    security_log('tesla_helper_view');
     $configExistedAtStart = is_file(config_file_path());
     $configResetReason = null;
     $state['config'] = load_config($configResetReason);
@@ -387,6 +422,7 @@ try {
     }
 
     if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'save_config') {
+        verify_csrf_or_throw();
         $config = [
             'client_id' => trim((string) ($_POST['client_id'] ?? '')),
             'client_secret' => trim((string) ($_POST['client_secret'] ?? '')),
@@ -400,6 +436,7 @@ try {
         }
 
         save_config($config);
+        security_log('tesla_helper_config_saved', ['redirect_uri' => $config['redirect_uri']]);
         $state['config'] = $config;
         $state['message'] = 'Configuracion guardada correctamente.';
         $state['show_config_path'] = !$configExistedAtStart;
@@ -417,6 +454,12 @@ try {
             throw new RuntimeException('No hay configuracion guardada. Guarda primero client_id, client_secret y redirect_uri.');
         }
 
+        $expectedState = consume_oauth_state_token();
+        $receivedState = trim((string) ($_GET['state'] ?? ''));
+        if ($expectedState === '' || $receivedState === '' || !hash_equals($expectedState, $receivedState)) {
+            throw new RuntimeException('OAuth state validation failed.');
+        }
+
         if (current_url_base() !== $state['config']['redirect_uri']) {
             throw new RuntimeException(
                 'La URL actual no coincide con redirect_uri.' . "\n" .
@@ -426,10 +469,12 @@ try {
         }
 
         $tokenPayload = build_token_payload($state['config'], trim((string) $_GET['code']));
+        security_log('tesla_helper_token_generated');
         $state['download_json'] = json_encode($tokenPayload, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n";
         $state['message'] = 'TeslaApiTokens.json generado correctamente.';
     }
 } catch (Throwable $e) {
+    security_log('tesla_helper_error', ['message' => $e->getMessage()]);
     $state['error'] = $e->getMessage();
 }
 

@@ -1,15 +1,16 @@
 <?php
 
-require_once __DIR__ . '/config.php';
+require_once __DIR__ . '/load_config.php';
 require_once __DIR__ . '/functions.php';
 
-header('Expires: Mon, 26 Jul 1997 05:00:00 GMT');
-header('Last-Modified: ' . gmdate("D, d M Y H:i:s") . 'GMT');
-header('Cache-Control: no-cache, must-revalidate');
-header('Pragma: no-cache');
+start_secure_session();
+send_security_headers();
+handle_login_submission('TWCManager Control Panel');
+enforce_session_timeout('TWCManager Control Panel');
+handle_logout_submission();
 
 $ipcKey = ftok($twcScriptDir, "T");
-$ipcQueue = msg_get_queue($ipcKey, 0666);
+$ipcQueue = msg_get_queue($ipcKey, 0660);
 
 $pageMode = 'normal';
 $flashMessage = '';
@@ -18,19 +19,29 @@ $debugResponse = '';
 $debugDecoded = '';
 $dumpStateResponse = '';
 
-$submit = request_str('submit');
-$debugTWC = request_str('debugTWC');
-$setDebugLevel = request_str('setDebugLevel');
-$beginTest = request_str('beginTest');
-$sendTWCMsg = request_str('sendTWCMsg');
-$setMasterHeartbeatData = request_str('setMasterHeartbeatData');
-$dumpState = request_str('dumpState');
-$nonScheduledAmpsMaxRequest = request_str('nonScheduledAmpsMax');
-$scheduledAmpsMaxRequest = request_str('scheduledAmpsMax');
-$scheduledAmpStartTimeRequest = request_str('scheduledAmpStartTime');
-$scheduledAmpsEndTimeRequest = request_str('scheduledAmpsEndTime');
-$resumeTrackGreenEnergyTimeRequest = request_str('resumeTrackGreenEnergyTime');
-$scheduledAmpsDayRequest = request_array('scheduledAmpsDay');
+$requestMethod = request_method();
+$submit = ($requestMethod === 'POST') ? request_post_str('submit') : request_get_str('submit');
+$debugTWC = request_get_str('debugTWC');
+$sendTWCMsgPage = request_get_present('sendTWCMsg');
+$heartbeatPage = request_get_present('setMasterHeartbeatData');
+$dumpState = request_get_str('dumpState');
+
+$setDebugLevel = request_post_str('setDebugLevel');
+$beginTest = request_post_str('beginTest');
+$sendTWCMsg = request_post_str('sendTWCMsg');
+$setMasterHeartbeatData = request_post_str('setMasterHeartbeatData');
+$nonScheduledAmpsMaxRequest = request_post_str('nonScheduledAmpsMax');
+$scheduledAmpsMaxRequest = request_post_str('scheduledAmpsMax');
+$scheduledAmpStartTimeRequest = request_post_str('scheduledAmpStartTime');
+$scheduledAmpsEndTimeRequest = request_post_str('scheduledAmpsEndTime');
+$resumeTrackGreenEnergyTimeRequest = request_post_str('resumeTrackGreenEnergyTime');
+$scheduledAmpsDayRequest = request_post_array('scheduledAmpsDay');
+$csrfToken = ensure_csrf_token();
+
+if(!$webEnableDebugTools && ($debugTWC !== '' || $sendTWCMsgPage || $heartbeatPage || $dumpState !== '')) {
+    security_log('debug_access_blocked');
+    $flashError = 'Debug tools are disabled in this deployment.';
+}
 
 $initialStatus = parse_status_response(ipc_query('getStatus'));
 $initialTwcModelMaxAmps = 80;
@@ -49,22 +60,25 @@ $allowedNonScheduledAmpValues = array_merge(array('-1', '0'), $allowedStandardAm
 $allowedHourValues = array_values(build_hour_options($initialUse24HourTime));
 $allowedResumeTrackValues = array_merge(array('-1:00'), $allowedHourValues);
 
-if($debugTWC !== '') {
+if($webEnableDebugTools && $debugTWC !== '') {
     $pageMode = 'debug';
-    if($submit !== '') {
+    security_log('debug_page_view');
+    if($requestMethod === 'POST' && $submit !== '') {
+        validate_post_only_action('Debug action');
         $validatedDebugLevel = validate_int_range($setDebugLevel, 0, 100);
         if($validatedDebugLevel !== null) {
             if(ipc_command('setDebugLevel=' . $validatedDebugLevel)) {
+                security_log('debug_level_changed', ['level' => $validatedDebugLevel]);
                 $flashMessage = 'Debug level updated.';
             }
             else {
                 $flashError = 'Unable to send debug level command.';
             }
         }
-        elseif(request_present('setDebugLevel')) {
+        elseif(request_post_present('setDebugLevel')) {
             $flashError = 'Debug level must be an integer between 0 and 100.';
         }
-        elseif(request_present('beginTest')) {
+        elseif(request_post_present('beginTest')) {
             $validatedBeginTest = validate_debug_token($beginTest);
             if($validatedBeginTest === null) {
                 $flashError = 'Debug test contains invalid characters.';
@@ -72,6 +86,7 @@ if($debugTWC !== '') {
             else {
                 $cmd = ($validatedBeginTest === '') ? 'beginTest' : ('beginTest=' . $validatedBeginTest);
                 if(ipc_command($cmd)) {
+                    security_log('debug_test_started', ['value' => $validatedBeginTest]);
                     $flashMessage = 'Debug test command sent.';
                 }
                 else {
@@ -81,14 +96,17 @@ if($debugTWC !== '') {
         }
     }
 }
-elseif(request_present('sendTWCMsg')) {
+elseif($webEnableDebugTools && $sendTWCMsgPage) {
     $pageMode = 'send';
-    if($submit !== '' && $sendTWCMsg !== '') {
+    security_log('debug_send_page_view');
+    if($requestMethod === 'POST' && $submit !== '' && $sendTWCMsg !== '') {
+        validate_post_only_action('Send RS-485 message');
         $validatedSendTWCMsg = validate_hex_payload($sendTWCMsg, false, 15);
         if($validatedSendTWCMsg === null) {
             $flashError = 'RS-485 payload must be valid hex with an even number of characters and at most 15 bytes.';
         }
         elseif(ipc_command('sendTWCMsg=' . $validatedSendTWCMsg)) {
+            security_log('debug_rs485_message_sent', ['payload' => $validatedSendTWCMsg]);
             sleep(3);
             if(substr($validatedSendTWCMsg, 0, 4) === 'FCA1') {
                 sleep(5);
@@ -102,14 +120,17 @@ elseif(request_present('sendTWCMsg')) {
         }
     }
 }
-elseif(request_present('setMasterHeartbeatData')) {
+elseif($webEnableDebugTools && $heartbeatPage) {
     $pageMode = 'heartbeat';
-    if($submit !== '') {
+    security_log('debug_heartbeat_page_view');
+    if($requestMethod === 'POST' && $submit !== '') {
+        validate_post_only_action('Heartbeat override');
         $validatedHeartbeatData = validate_hex_payload($setMasterHeartbeatData, true, 9);
         if($validatedHeartbeatData === null) {
             $flashError = 'Master heartbeat override must be valid hex with an even number of characters and at most 9 bytes.';
         }
         elseif(ipc_command('setMasterHeartbeatData=' . $validatedHeartbeatData)) {
+            security_log('debug_heartbeat_override', ['payload' => $validatedHeartbeatData]);
             $flashMessage = ($setMasterHeartbeatData === '')
                 ? 'Master heartbeat override cleared.'
                 : 'Master heartbeat override updated.';
@@ -119,20 +140,23 @@ elseif(request_present('setMasterHeartbeatData')) {
         }
     }
 }
-elseif($dumpState !== '') {
+elseif($webEnableDebugTools && $dumpState !== '') {
     $pageMode = 'dump';
+    security_log('debug_dumpstate_view');
     $dumpStateResponse = ipc_query('dumpState', true);
     if($dumpStateResponse === '') {
         $flashError = 'No response from TWCManager.';
     }
 }
 else {
-    if($nonScheduledAmpsMaxRequest !== '') {
+    if($requestMethod === 'POST' && $nonScheduledAmpsMaxRequest !== '') {
+        validate_post_only_action('Non-scheduled charging update');
         $validatedNonScheduledAmps = validate_choice($nonScheduledAmpsMaxRequest, $allowedNonScheduledAmpValues);
         if($validatedNonScheduledAmps === null) {
             $flashError = 'Invalid non-scheduled charging limit.';
         }
         elseif(ipc_command('setNonScheduledAmps=' . $validatedNonScheduledAmps)) {
+            security_log('non_scheduled_limit_changed', ['value' => $validatedNonScheduledAmps]);
             $flashMessage = 'Non-scheduled charging limit updated.';
         }
         else {
@@ -140,7 +164,8 @@ else {
         }
     }
 
-    if($scheduledAmpsMaxRequest !== '') {
+    if($requestMethod === 'POST' && $scheduledAmpsMaxRequest !== '') {
+        validate_post_only_action('Scheduled charging update');
         $validatedScheduledAmps = validate_choice($scheduledAmpsMaxRequest, $allowedScheduledAmpValues);
         $validatedScheduledStart = validate_choice($scheduledAmpStartTimeRequest, $allowedHourValues);
         $validatedScheduledEnd = validate_choice($scheduledAmpsEndTimeRequest, $allowedHourValues);
@@ -160,6 +185,12 @@ else {
                 . "\nendTime=" . ($validatedScheduledEnd ?? '00:00')
                 . "\ndays=" . $daysBitmap;
             if(ipc_command($cmd)) {
+                security_log('scheduled_charging_changed', [
+                    'amps' => $validatedScheduledAmps,
+                    'start' => ($validatedScheduledStart ?? '00:00'),
+                    'end' => ($validatedScheduledEnd ?? '00:00'),
+                    'days' => $daysBitmap,
+                ]);
                 $flashMessage = 'Scheduled charging settings updated.';
             }
             else {
@@ -168,12 +199,14 @@ else {
         }
     }
 
-    if($resumeTrackGreenEnergyTimeRequest !== '') {
+    if($requestMethod === 'POST' && $resumeTrackGreenEnergyTimeRequest !== '') {
+        validate_post_only_action('Green-energy resume update');
         $validatedResumeTrack = validate_choice($resumeTrackGreenEnergyTimeRequest, $allowedResumeTrackValues);
         if($validatedResumeTrack === null) {
             $flashError = 'Invalid green-energy resume time.';
         }
         elseif(ipc_command('setResumeTrackGreenEnergyTime=' . $validatedResumeTrack)) {
+            security_log('green_energy_resume_changed', ['value' => $validatedResumeTrack]);
             $flashMessage = 'Green-energy resume time updated.';
         }
         else {
@@ -181,16 +214,20 @@ else {
         }
     }
 
-    if(preg_match('/^1-day charge/', $submit)) {
+    if($requestMethod === 'POST' && preg_match('/^1-day charge/', $submit)) {
+        validate_post_only_action('1-day charge enable');
         if(ipc_command('chargeNow')) {
+            security_log('charge_now_enabled');
             $flashMessage = '24-hour charge override enabled.';
         }
         else {
             $flashError = 'Unable to enable 24-hour charge override.';
         }
     }
-    elseif($submit === 'Cancel 1-day charge') {
+    elseif($requestMethod === 'POST' && $submit === 'Cancel 1-day charge') {
+        validate_post_only_action('1-day charge cancel');
         if(ipc_command('chargeNowCancel')) {
+            security_log('charge_now_cancelled');
             $flashMessage = '24-hour charge override cancelled.';
         }
         else {
@@ -215,11 +252,11 @@ for($i = 0; $i < 7; $i++) {
 
 $pageTitle = ($pageMode === 'debug') ? 'TWCDebug | TWCManager Control Panel' : 'TWCManager Control Panel';
 $mainViewUrl = page_url();
-$debugMenuUrl = page_url(array('debugTWC' => 1));
-$teslaHelperUrl = 'tesla_callback.php';
-$sendMessageUrl = page_url(array('sendTWCMsg' => '', 'submit' => 1));
-$heartbeatUrl = page_url(array('setMasterHeartbeatData' => '', 'submit' => 1));
-$dumpStateUrl = page_url(array('dumpState' => 1, 'submit' => 1));
+$debugMenuUrl = $webEnableDebugTools ? page_url(array('debugTWC' => 1)) : '';
+$teslaHelperUrl = $webEnableTeslaHelper ? 'tesla_callback.php' : '';
+$sendMessageUrl = $webEnableDebugTools ? page_url(array('sendTWCMsg' => '')) : '';
+$heartbeatUrl = $webEnableDebugTools ? page_url(array('setMasterHeartbeatData' => '')) : '';
+$dumpStateUrl = $webEnableDebugTools ? page_url(array('dumpState' => 1)) : '';
 $statusValid = $status['valid'];
 $backendBadgeClass = $statusValid ? 'good' : '';
 $backendBadgeText = $statusValid ? 'Backend reachable' : 'Backend unavailable';

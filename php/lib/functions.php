@@ -5,28 +5,328 @@ function h($value)
     return htmlspecialchars((string)$value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
 }
 
-function request_data()
+function security_log($event, $details = array())
 {
-    return array_merge($_GET, $_POST);
+    global $webSecurityLogEnabled, $webSecurityLogFile;
+
+    if(empty($webSecurityLogEnabled) || !is_string($webSecurityLogFile) || trim($webSecurityLogFile) === '') {
+        return;
+    }
+
+    $payload = [
+        'ts' => gmdate('c'),
+        'event' => (string)$event,
+        'client' => get_request_client_address(),
+        'path' => current_request_path(),
+        'authenticated' => is_authenticated(),
+    ];
+
+    if(is_array($details)) {
+        foreach($details as $key => $value) {
+            $payload[(string)$key] = $value;
+        }
+    }
+
+    $line = json_encode($payload, JSON_UNESCAPED_SLASHES);
+    if(is_string($line)) {
+        @file_put_contents($webSecurityLogFile, $line . "\n", FILE_APPEND | LOCK_EX);
+    }
 }
 
-function request_str($key, $default = '')
+function start_secure_session()
 {
-    $request = request_data();
-    return isset($request[$key]) ? (string)$request[$key] : $default;
+    if(session_status() === PHP_SESSION_ACTIVE) {
+        return;
+    }
+
+    $https = !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off';
+    session_set_cookie_params([
+        'lifetime' => 0,
+        'path' => '/',
+        'httponly' => true,
+        'secure' => $https,
+        'samesite' => 'Strict',
+    ]);
+    session_start();
 }
 
-function request_array($key)
+function send_security_headers()
 {
-    $request = request_data();
-    $value = $request[$key] ?? array();
+    header('Expires: Mon, 26 Jul 1997 05:00:00 GMT');
+    header('Last-Modified: ' . gmdate("D, d M Y H:i:s") . ' GMT');
+    header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+    header('Pragma: no-cache');
+    header('X-Frame-Options: DENY');
+    header('X-Content-Type-Options: nosniff');
+    header('Referrer-Policy: same-origin');
+    header('Permissions-Policy: accelerometer=(), camera=(), geolocation=(), gyroscope=(), microphone=(), payment=(), usb=()');
+    header("Content-Security-Policy: default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; form-action 'self' https://auth.tesla.com; frame-ancestors 'none'; base-uri 'self'; object-src 'none'");
+}
+
+function request_method()
+{
+    $method = strtoupper((string)($_SERVER['REQUEST_METHOD'] ?? 'GET'));
+    return in_array($method, ['GET', 'POST'], true) ? $method : 'GET';
+}
+
+function request_get_str($key, $default = '')
+{
+    return isset($_GET[$key]) ? (string)$_GET[$key] : $default;
+}
+
+function request_post_str($key, $default = '')
+{
+    return isset($_POST[$key]) ? (string)$_POST[$key] : $default;
+}
+
+function request_post_array($key)
+{
+    $value = $_POST[$key] ?? array();
     return is_array($value) ? $value : array();
 }
 
-function request_present($key)
+function request_get_present($key)
 {
-    $request = request_data();
-    return array_key_exists($key, $request);
+    return array_key_exists($key, $_GET);
+}
+
+function request_post_present($key)
+{
+    return array_key_exists($key, $_POST);
+}
+
+function ensure_csrf_token()
+{
+    start_secure_session();
+    if(empty($_SESSION['csrf_token']) || !is_string($_SESSION['csrf_token'])) {
+        $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+    }
+
+    return $_SESSION['csrf_token'];
+}
+
+function csrf_input()
+{
+    return '<input type="hidden" name="csrf_token" value="' . h(ensure_csrf_token()) . '">';
+}
+
+function verify_csrf_or_throw()
+{
+    start_secure_session();
+    $submitted = (string)($_POST['csrf_token'] ?? '');
+    $expected = (string)($_SESSION['csrf_token'] ?? '');
+    if($submitted === '' || $expected === '' || !hash_equals($expected, $submitted)) {
+        security_log('csrf_failed');
+        throw new RuntimeException('Invalid CSRF token.');
+    }
+}
+
+function is_authenticated()
+{
+    start_secure_session();
+    return !empty($_SESSION['authenticated']);
+}
+
+function destroy_session_state()
+{
+    start_secure_session();
+    $_SESSION = [];
+    if(ini_get('session.use_cookies')) {
+        $params = session_get_cookie_params();
+        setcookie(session_name(), '', time() - 42000, $params['path'], $params['domain'] ?? '', $params['secure'], $params['httponly']);
+    }
+    session_destroy();
+}
+
+function enforce_session_timeout($title = 'TWCManager Login')
+{
+    global $webSessionIdleTimeoutSeconds, $webSessionAbsoluteTimeoutSeconds;
+
+    start_secure_session();
+    if(!is_authenticated()) {
+        return;
+    }
+
+    $now = time();
+    $startedAt = (int)($_SESSION['session_started_at'] ?? 0);
+    $lastActivity = (int)($_SESSION['last_activity_at'] ?? 0);
+    if($startedAt <= 0) {
+        $startedAt = $now;
+    }
+    if($lastActivity <= 0) {
+        $lastActivity = $now;
+    }
+
+    $idleTimeout = max(0, (int)$webSessionIdleTimeoutSeconds);
+    $absoluteTimeout = max(0, (int)$webSessionAbsoluteTimeoutSeconds);
+    $reason = '';
+
+    if($idleTimeout > 0 && ($now - $lastActivity) > $idleTimeout) {
+        $reason = 'idle_timeout';
+    }
+    elseif($absoluteTimeout > 0 && ($now - $startedAt) > $absoluteTimeout) {
+        $reason = 'absolute_timeout';
+    }
+
+    if($reason !== '') {
+        security_log('session_expired', ['reason' => $reason]);
+        destroy_session_state();
+        render_login_page($title, 'Session expired. Please sign in again.');
+        exit;
+    }
+
+    $_SESSION['session_started_at'] = $startedAt;
+    $_SESSION['last_activity_at'] = $now;
+}
+
+function login_attempt_allowed()
+{
+    start_secure_session();
+    $attempts = $_SESSION['login_attempts'] ?? [];
+    $now = time();
+    $recent = [];
+    foreach($attempts as $ts) {
+        if(is_int($ts) && ($now - $ts) < 900) {
+            $recent[] = $ts;
+        }
+    }
+    $_SESSION['login_attempts'] = $recent;
+    return count($recent) < 10;
+}
+
+function record_login_attempt()
+{
+    start_secure_session();
+    $attempts = $_SESSION['login_attempts'] ?? [];
+    $attempts[] = time();
+    $_SESSION['login_attempts'] = $attempts;
+}
+
+function handle_login_submission($title = 'TWCManager Login')
+{
+    global $webRequireAuth, $webUsername, $webPasswordHash;
+
+    start_secure_session();
+    if(!$webRequireAuth) {
+        $_SESSION['authenticated'] = true;
+        $_SESSION['session_started_at'] = time();
+        $_SESSION['last_activity_at'] = time();
+        return;
+    }
+
+    if(trim((string)$webUsername) === '' || trim((string)$webPasswordHash) === '') {
+        render_login_page($title, 'Web authentication is enabled but username/password hash are not configured.');
+        exit;
+    }
+
+    if(is_authenticated()) {
+        return;
+    }
+
+    $error = '';
+    if(request_method() === 'POST' && request_post_str('action') === 'login') {
+        verify_csrf_or_throw();
+        if(!login_attempt_allowed()) {
+            security_log('login_rate_limited');
+            $error = 'Too many failed login attempts. Please wait and try again.';
+        }
+        else {
+            $username = trim(request_post_str('username'));
+            $password = request_post_str('password');
+            $usernameValid = ($webUsername !== '' && hash_equals($webUsername, $username));
+            $passwordValid = ($webPasswordHash !== '' && password_verify($password, $webPasswordHash));
+            if($usernameValid && $passwordValid) {
+                session_regenerate_id(true);
+                $_SESSION['authenticated'] = true;
+                $_SESSION['login_attempts'] = [];
+                $_SESSION['session_started_at'] = time();
+                $_SESSION['last_activity_at'] = time();
+                security_log('login_success', ['username' => $username]);
+                return;
+            }
+            record_login_attempt();
+            security_log('login_failed', ['username' => $username]);
+            $error = 'Invalid username or password.';
+        }
+    }
+
+    render_login_page($title, $error);
+    exit;
+}
+
+function current_request_path()
+{
+    $path = (string)parse_url((string)($_SERVER['REQUEST_URI'] ?? ''), PHP_URL_PATH);
+    if($path === '') {
+        $path = basename((string)($_SERVER['SCRIPT_NAME'] ?? 'index.php'));
+    }
+    return $path;
+}
+
+function handle_logout_submission($redirectPath = '')
+{
+    if(request_method() !== 'POST' || request_post_str('action') !== 'logout') {
+        return;
+    }
+
+    verify_csrf_or_throw();
+    security_log('logout');
+    destroy_session_state();
+    if(!is_string($redirectPath) || $redirectPath === '') {
+        $redirectPath = current_request_path();
+    }
+    header('Location: ' . $redirectPath);
+    exit;
+}
+
+function render_login_page($title, $error = '')
+{
+    header('Content-Type: text/html; charset=utf-8');
+    ?>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title><?php echo h($title); ?></title>
+<style>
+body{margin:0;font-family:Georgia,serif;background:#efe8dc;color:#18313c}
+.wrap{max-width:420px;margin:80px auto;padding:0 18px}
+.card{background:#fffdf9;border:1px solid #d8c9b5;padding:24px;box-shadow:0 12px 30px rgba(54,39,20,.08)}
+label{display:block;margin:12px 0 6px;font-weight:700}
+input{width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid #d8c9b5}
+button{margin-top:16px;border:0;background:#b13f24;color:#fff;padding:11px 16px;cursor:pointer}
+.error{color:#8f220d}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <h1><?php echo h($title); ?></h1>
+    <?php if($error !== ''): ?><p class="error"><?php echo h($error); ?></p><?php endif; ?>
+    <form method="post">
+      <?php echo csrf_input(); ?>
+      <input type="hidden" name="action" value="login">
+      <label for="username">Username</label>
+      <input id="username" name="username" autocomplete="username" required>
+      <label for="password">Password</label>
+      <input id="password" type="password" name="password" autocomplete="current-password" required>
+      <button type="submit">Sign in</button>
+    </form>
+  </div>
+</div>
+</body>
+</html>
+<?php
+}
+
+function validate_post_only_action($actionName)
+{
+    if(request_method() !== 'POST') {
+        security_log('invalid_method', ['action' => $actionName, 'method' => request_method()]);
+        throw new RuntimeException($actionName . ' must be sent via POST.');
+    }
+    verify_csrf_or_throw();
 }
 
 function first_readable_file($paths)
@@ -162,11 +462,17 @@ function validate_debug_token($value, $maxLength = 64)
 
 function get_request_client_address()
 {
+    global $webTrustProxyHeaders;
+
+    $useProxyHeaders = !empty($webTrustProxyHeaders);
     foreach([
-        'HTTP_X_FORWARDED_FOR',
-        'HTTP_X_REAL_IP',
         'REMOTE_ADDR',
+        'HTTP_X_REAL_IP',
+        'HTTP_X_FORWARDED_FOR',
     ] as $key) {
+        if(($key === 'HTTP_X_REAL_IP' || $key === 'HTTP_X_FORWARDED_FOR') && !$useProxyHeaders) {
+            continue;
+        }
         if(empty($_SERVER[$key])) {
             continue;
         }
@@ -197,6 +503,20 @@ function build_ipc_message($command)
     ];
 
     return '__meta__=' . json_encode($metadata) . "\n" . $command;
+}
+
+function canonical_base_url()
+{
+    global $webBaseUrl;
+
+    $configured = trim((string)$webBaseUrl);
+    if($configured !== '') {
+        return rtrim($configured, '/');
+    }
+
+    $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+    $host = (string)($_SERVER['HTTP_HOST'] ?? 'localhost');
+    return $scheme . '://' . $host;
 }
 
 function ipc_send($ipcMsgTime, $ipcMsgID, $ipcMsg, $ipcMsgType = 2)

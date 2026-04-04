@@ -12,7 +12,7 @@ protocol reverse-engineering work are by **Chris Dragon**.
 This repository has also been substantially modified and modernized by
 **Carlos Martin Ugalde** (GitHub: `carlosmaug`). That work includes deep code
 updates, structural cleanup, documentation improvements, Tesla token web
-tooling in `HTML/tesla_callback.php`, PHP compatibility work, and broader
+tooling in `php/tesla_callback.php`, PHP compatibility work, and broader
 ongoing maintenance beyond the original codebase.
 
 ## What The Program Actually Does
@@ -33,7 +33,7 @@ In practice, the program:
 - persists mutable settings to `TWCManagerSettings.txt`
 - stores Tesla API tokens separately in `TeslaApiTokens.json` or `TESLA_API_*` environment variables
 - maintains a persistent delivered-energy counter in kWh
-- exposes an IPC interface used by the bundled PHP web UI in `HTML/`
+- exposes an IPC interface used by the bundled PHP web UI in `php/`
 
 ## Current Behavior In This Repository
 
@@ -83,7 +83,7 @@ This path is used when changing the charger-side amp offer is not enough to prod
 
 ## Web UI And IPC
 
-The `HTML/` directory contains a PHP web interface that communicates with `TWCManager.py` through **SysV IPC message queues**.
+The `php/` directory contains a PHP web interface that communicates with `TWCManager.py` through **SysV IPC message queues**.
 
 From that interface, the running process can:
 
@@ -97,16 +97,16 @@ From that interface, the running process can:
 
 `chargeNow` forces charging at the installation maximum for 24 hours unless cancelled sooner.
 
-## HTML Directory
+## PHP Directory
 
-The `HTML/` directory currently contains:
+The `php/` directory currently contains:
 
 - `index.php`
 - `tesla_callback.php`
 - `favicon.png`
 - `refresh.png`
 
-### `HTML/index.php`
+### `php/index.php`
 
 `index.php` is the main browser UI for a running `TWCManager.py` process.
 
@@ -147,7 +147,7 @@ There is one important mismatch between the current PHP and Python code:
 - the current `TWCManager.py` no longer implements the old `carApiEmailPassword=...` IPC command
 - the supported approach today is token-based Tesla access, either by placing `TeslaApiTokens.json`, using `TESLA_API_*` environment variables, or generating tokens with `tesla_callback.php`
 
-### `HTML/tesla_callback.php`
+### `php/tesla_callback.php`
 
 `tesla_callback.php` is a separate OAuth helper for Tesla token generation. It does not control charging directly and it does not talk to the IPC queue.
 
@@ -181,7 +181,7 @@ If the web UI shows `Tesla API not operative`, or the Python log contains:
 
 then the stored Tesla token set is no longer usable and should be replaced.
 
-The recommended renewal path in this repository is `HTML/tesla_callback.php`.
+The recommended renewal path in this repository is `php/tesla_callback.php`.
 
 Prerequisites:
 
@@ -363,8 +363,8 @@ If you use the bundled web UI, you also need:
 - `TWCManager.py`: main application logic
 - `TWCManagerSettings.txt`: persistent configuration and saved runtime state
 - `TeslaApiTokens.json`: Tesla API tokens
-- `HTML/index.php`: main web UI, scheduler form, and low-level debug interface
-- `HTML/tesla_callback.php`: Tesla OAuth helper that generates `TeslaApiTokens.json`
+- `php/index.php`: main web UI, scheduler form, and low-level debug interface
+- `php/tesla_callback.php`: Tesla OAuth helper that generates `TeslaApiTokens.json`
 - `TWCManager Installation.pdf`: original installation guide
 
 ## Limitations And Safety Notes

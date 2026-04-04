@@ -1,0 +1,38 @@
+<?php
+
+///////////////////////////////////////////////////////////////////////////
+// Configuration parameters
+
+$debugLevel = 0;
+
+// Point this to the directory containing TWCManager.py.
+$twcScriptDir = "/srv/TWCManager/";
+
+// Application-level web authentication.
+// Generate hashes with:
+//   php -r 'echo password_hash("change-me", PASSWORD_DEFAULT), PHP_EOL;'
+$webRequireAuth = true;
+$webUsername = 'admin';
+$webPasswordHash = '';
+
+// Session security.
+$webSessionIdleTimeoutSeconds = 1800;
+$webSessionAbsoluteTimeoutSeconds = 43200;
+
+// Feature gates.
+$webEnableDebugTools = false;
+$webEnableTeslaHelper = true;
+
+// Public HTTPS base URL for this web UI, without trailing slash.
+// Example: https://twcmanager.local
+$webBaseUrl = '';
+
+// Whether to trust reverse-proxy client IP headers such as X-Forwarded-For.
+$webTrustProxyHeaders = false;
+
+// Separate security log file for authentication and administrative actions.
+$webSecurityLogEnabled = true;
+$webSecurityLogFile = '/var/log/twcmanager-web-security.log';
+
+// End configuration parameters
+///////////////////////////////////////////////////////////////////////////

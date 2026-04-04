@@ -552,9 +552,18 @@
             <p class="page-subtitle">Monitor the live RS-485 status, review the active charging policy, and adjust Wall Connector behavior from one page.</p>
         </div>
         <div class="hero-actions">
+            <form action="index.php" method="post">
+                <?=csrf_input()?>
+                <input type="hidden" name="action" value="logout">
+                <button class="button ghost" type="submit">Sign Out</button>
+            </form>
             <a class="button ghost" href="<?=h($mainViewUrl)?>">Main View</a>
+            <?php if($debugMenuUrl !== ''): ?>
             <a class="button ghost" href="<?=h($debugMenuUrl)?>">Debug Menu</a>
+            <?php endif; ?>
+            <?php if($teslaHelperUrl !== ''): ?>
             <a class="button ghost" href="<?=h($teslaHelperUrl)?>">Tesla Token Helper</a>
+            <?php endif; ?>
         </div>
     </div>
 
@@ -576,7 +585,8 @@
         <p class="muted">Use these tools only for protocol diagnostics. Some commands can affect charger behavior directly.</p>
 
         <div class="field-grid">
-            <form class="field" action="index.php" method="get">
+            <form class="field" action="index.php?debugTWC=1" method="post">
+                <?=csrf_input()?>
                 <input type="hidden" name="debugTWC" value="1">
                 <label for="setDebugLevel">Debug Level</label>
                 <input id="setDebugLevel" type="text" name="setDebugLevel" value="<?=h($setDebugLevel)?>">
@@ -585,7 +595,8 @@
                 </div>
             </form>
 
-            <form class="field" action="index.php" method="get">
+            <form class="field" action="index.php?debugTWC=1" method="post">
+                <?=csrf_input()?>
                 <input type="hidden" name="debugTWC" value="1">
                 <label for="beginTest">Debug Test</label>
                 <input id="beginTest" type="text" name="beginTest" value="<?=h($beginTest)?>">
@@ -606,7 +617,8 @@
         <h2>Send RS-485 Message</h2>
         <p class="muted">This tool is for protocol debugging. TWCManager blocks some dangerous message types, but sending arbitrary frames still carries risk.</p>
 
-        <form action="index.php" method="get">
+        <form action="index.php?sendTWCMsg=" method="post">
+            <?=csrf_input()?>
             <div class="field">
                 <label for="sendTWCMsg">Hex Payload</label>
                 <input id="sendTWCMsg" type="text" name="sendTWCMsg" value="<?=h($sendTWCMsg)?>">
@@ -618,11 +630,7 @@
         </form>
 
         <div class="subnav">
-            <a href="<?=h(page_url(array('sendTWCMsg' => 'FB1B', 'submit' => 1)))?>">Get firmware version</a>
-            <a href="<?=h(page_url(array('sendTWCMsg' => 'FB19', 'submit' => 1)))?>">Get serial number</a>
-            <a href="<?=h(page_url(array('sendTWCMsg' => 'FB1A', 'submit' => 1)))?>">Get model</a>
-            <a href="<?=h(page_url(array('sendTWCMsg' => 'FCE1777766', 'submit' => 1)))?>">Master Linkready1</a>
-            <a href="<?=h(page_url(array('sendTWCMsg' => 'FBE2777766', 'submit' => 1)))?>">Master Linkready2</a>
+            <span class="muted">Preset debug frames are disabled for direct one-click execution. Paste the payload manually if needed.</span>
         </div>
 
         <?php if($debugResponse !== ''): ?>
@@ -639,24 +647,20 @@
     <div class="panel">
         <h2>Override Master Heartbeat</h2>
         <p class="muted">This tool forces custom master heartbeat payload data for debugging and protocol experiments.</p>
-        <form action="index.php" method="get">
+        <form action="index.php?setMasterHeartbeatData=" method="post">
+            <?=csrf_input()?>
             <div class="field">
                 <label for="setMasterHeartbeatData">Heartbeat Data</label>
                 <input id="setMasterHeartbeatData" type="text" name="setMasterHeartbeatData" value="<?=h($setMasterHeartbeatData)?>">
             </div>
             <div class="inline-actions">
                 <input type="submit" name="submit" value="Submit">
-                <a class="button ghost" href="<?=h($heartbeatUrl)?>">Clear Override</a>
+                <button class="button ghost" type="submit" name="setMasterHeartbeatData" value="">Clear Override</button>
                 <a class="button ghost" href="<?=h($debugMenuUrl)?>">Back To Debug Menu</a>
             </div>
         </form>
         <div class="subnav">
-            <a href="<?=h(page_url(array('setMasterHeartbeatData' => '05', 'submit' => 1)))?>">Charge 0A</a>
-            <a href="<?=h(page_url(array('setMasterHeartbeatData' => '050258', 'submit' => 1)))?>">Charge 6A</a>
-            <a href="<?=h(page_url(array('setMasterHeartbeatData' => '050834', 'submit' => 1)))?>">Charge 21A</a>
-            <a href="<?=h(page_url(array('setMasterHeartbeatData' => '050FA0', 'submit' => 1)))?>">Charge 40A</a>
-            <a href="<?=h(page_url(array('setMasterHeartbeatData' => '093200', 'submit' => 1)))?>">Charge 128A</a>
-            <a href="<?=h(page_url(array('setMasterHeartbeatData' => '0201', 'submit' => 1)))?>">Error 1</a>
+            <span class="muted">Preset heartbeat overrides are disabled for direct one-click execution. Enter the payload manually if needed.</span>
         </div>
     </div>
     <?php elseif($pageMode === 'dump'): ?>
@@ -710,7 +714,8 @@
         <div class="callout">
             <strong>1-day charge is active.</strong>
             TWCManager is forcing normal charging for approximately <?=h($chargeNowRemainingDisplay)?> more.
-            <form action="index.php" method="get">
+            <form action="index.php" method="post">
+                <?=csrf_input()?>
                 <input type="submit" name="submit" value="Cancel 1-day charge">
             </form>
         </div>
@@ -720,7 +725,11 @@
         <div class="callout">
             <strong>Tesla token action needed.</strong>
             A connected charger appears to need Tesla API access, but no tokens are loaded.
+            <?php if($teslaHelperUrl !== ''): ?>
             Use <a href="tesla_callback.php">Tesla Token Helper</a> to generate `TeslaApiTokens.json`.
+            <?php else: ?>
+            The Tesla Token Helper is disabled in this deployment.
+            <?php endif; ?>
         </div>
         <?php endif; ?>
     </div>
@@ -742,7 +751,8 @@
 
             <div class="panel">
                 <h2>Adjust Settings</h2>
-                <form action="index.php" method="get">
+                <form action="index.php" method="post">
+                    <?=csrf_input()?>
                     <div class="field-grid">
                         <div class="field full">
                             <label for="scheduledAmpsMax">Scheduled Power</label>

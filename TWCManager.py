@@ -1452,7 +1452,7 @@ class WebIPCServer:
     """SysV message queue endpoint used by the companion web interface."""
     def __init__(self, script_path):
         self.key = sysv_ipc.ftok(re.sub('/[^/]+$', '/', script_path), ord('T'), True)
-        self.queue = sysv_ipc.MessageQueue(self.key, sysv_ipc.IPC_CREAT, 0o666)
+        self.queue = sysv_ipc.MessageQueue(self.key, sysv_ipc.IPC_CREAT, 0o660)
 
     def receive(self):
         return self.queue.receive(False, 2)
