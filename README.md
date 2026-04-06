@@ -149,7 +149,7 @@ There is one important mismatch between the current PHP and Python code:
 
 ### `php/tesla_callback.php`
 
-`tesla_callback.php` is a separate OAuth helper for Tesla token generation. It does not control charging directly and it does not talk to the IPC queue.
+`tesla_callback.php` is a separate OAuth helper for Tesla token generation and partner-registration preparation. It does not control charging directly and it does not talk to the IPC queue.
 
 Its job is to simplify the token bootstrap process for the current Python code:
 
@@ -158,19 +158,22 @@ Its job is to simplify the token bootstrap process for the current Python code:
 - receives Tesla's OAuth callback with `code=...`
 - exchanges the authorization code for Tesla tokens
 - converts the result into the exact `TeslaApiTokens.json` structure expected by `TWCManager.py`
-- triggers a browser download of that JSON file
+- stores that JSON file directly on the server for `TWCManager.py`
+- generates Tesla partner key material automatically when missing
+- publishes the public key under `public/.well-known/appspecific/com.tesla.3p.public-key.pem`
+- attempts Tesla partner-domain registration automatically and shows the status in the helper page
 
 Operational notes for this helper:
 
 - it uses Tesla's OAuth token endpoint directly with cURL
 - it validates that the current callback URL matches the saved `redirect_uri`
 - it stores its helper configuration in `tesla_oauth_config.json` by default, unless overridden with `TESLA_OAUTH_CONFIG_FILE`
-- it is intended for Apache/PHP-style deployments where generating `TeslaApiTokens.json` in a browser is convenient
+- it is intended for Apache/PHP-style deployments where handling Tesla OAuth and partner-registration preparation from the admin web UI is convenient
 
 In short:
 
 - use `index.php` to monitor and control a running TWCManager instance
-- use `tesla_callback.php` to generate the token JSON consumed by the Python process
+- use `tesla_callback.php` to generate and save the token JSON consumed by the Python process
 
 ### How To Renew Tesla Tokens
 
@@ -187,6 +190,7 @@ Prerequisites:
 
 - the PHP web UI is reachable in a browser
 - `tesla_callback.php` can write its helper config file
+- the web server can write the Tesla partner private key path and the public `.well-known` key path
 - the server can make outbound HTTPS requests to Tesla
 - you have a Tesla developer app with:
   - `client_id`
@@ -207,15 +211,20 @@ What you must do in Tesla first:
    - `https://your-host/tesla_callback.php`
 6. Make sure the redirect URI in Tesla is exactly identical to the URL that will receive the callback in your browser.
    It must match scheme, host, port, path, and trailing slash behavior exactly.
-7. Copy the Tesla app credentials you will later paste into `tesla_callback.php`:
+7. Add the helper host root domain to Tesla `allowed_origins`.
+   Example:
+   - if the helper is at `https://admin.example.com/tesla_callback.php`, the allowed origin should include `https://admin.example.com`
+8. Make sure that host is reachable publicly over HTTPS, because Tesla requires the partner public key to stay published at:
+   - `https://your-host/.well-known/appspecific/com.tesla.3p.public-key.pem`
+9. Copy the Tesla app credentials you will later paste into `tesla_callback.php`:
    - `client_id`
    - `client_secret`
-8. Use the Fleet API audience expected by this project unless you intentionally run against a different Tesla region:
+10. Use the Fleet API audience expected by this project unless you intentionally run against a different Tesla region:
    - Europe default: `https://fleet-api.prd.eu.vn.cloud.tesla.com`
-9. Use scopes that allow reading vehicle data, locating the vehicle, and sending charging commands.
+11. Use scopes that allow reading vehicle data, locating the vehicle, and sending charging commands.
    The helper defaults to:
    - `openid offline_access user_data vehicle_device_data vehicle_location vehicle_cmds vehicle_charging_cmds`
-10. Save the Tesla app changes in Tesla's developer portal before starting the browser login flow.
+12. Save the Tesla app changes in Tesla's developer portal before starting the browser login flow.
 
 Step by step:
 
@@ -228,15 +237,19 @@ Step by step:
    - `scope`
 3. Make sure the `redirect_uri` saved in the page is exactly the same as the redirect URI registered in Tesla.
    Even small differences such as `http` vs `https`, hostname, port, trailing slash, or reverse-proxy URL will break the flow.
-4. Click `Abrir login Tesla`.
-5. Sign in to Tesla and complete MFA if prompted.
-6. Let Tesla redirect the browser back to `tesla_callback.php`.
-7. Confirm that the page says `TeslaApiTokens.json generado correctamente.`
-8. Download the generated `TeslaApiTokens.json`.
-9. Place that file in the same directory as `TWCManager.py`.
+4. After saving, the helper automatically:
+   - creates Tesla partner key files if they do not already exist
+   - publishes the public key under the `.well-known` path inside `public/`
+   - attempts Tesla partner-domain registration against the configured audience
+5. In the helper page, review the `Estado Tesla Partner` card.
+   If Tesla registration is still pending, follow the remaining external steps shown there.
+6. Click `Abrir login Tesla`.
+7. Sign in to Tesla and complete MFA if prompted.
+8. Let Tesla redirect the browser back to `tesla_callback.php`.
+9. Confirm that the page says `TeslaApiTokens.json generado correctamente y guardado en el servidor ...`
+10. Ensure the running Python process can read that file.
    In a typical deployment from this repository that means:
    - `/srv/TWCManager/TeslaApiTokens.json`
-10. Ensure the running Python process can read that file.
 11. Restart `TWCManager.py`.
 12. Re-open the main web UI and confirm the Tesla status indicator is green.
 
@@ -248,20 +261,24 @@ Expected result after a successful renewal:
 
 Common mistakes:
 
-- the generated JSON was downloaded but never copied to the server that runs `TWCManager.py`
-- the JSON was copied to the wrong directory
-- the web server generated the file, but the Python process is using a different installation path
+- the helper saved `TeslaApiTokens.json`, but the Python process is using a different installation path
+- the web server could write the token file, but the Python process cannot read it
 - `redirect_uri` in Tesla does not exactly match the URL that handled the callback
 - the token set was generated from an incomplete or wrong OAuth app configuration
+- the helper could not create or publish the Tesla partner key files
+- the Tesla app is missing the correct `allowed_origins` entry for the helper domain
+- the `.well-known` public-key URL is not reachable over public HTTPS
 - the file permissions prevent the Python process from reading `TeslaApiTokens.json`
 
 Quick validation checklist:
 
 - `TeslaApiTokens.json` exists next to `TWCManager.py`
+- `public/.well-known/appspecific/com.tesla.3p.public-key.pem` exists and is served publicly
 - it contains at least:
   - `access_token`
   - `refresh_token`
   - `expires_at`
+- `tesla_callback.php` shows partner registration as completed, or a clear pending/error reason
 - after restart, the log no longer prints `Failed to refresh Tesla API token`
 - the Tesla API status badge in the web UI is green instead of red
 
@@ -364,7 +381,7 @@ If you use the bundled web UI, you also need:
 - `TWCManagerSettings.txt`: persistent configuration and saved runtime state
 - `TeslaApiTokens.json`: Tesla API tokens
 - `php/index.php`: main web UI, scheduler form, and low-level debug interface
-- `php/tesla_callback.php`: Tesla OAuth helper that generates `TeslaApiTokens.json`
+- `php/tesla_callback.php`: Tesla OAuth helper that prepares partner registration and saves `TeslaApiTokens.json`
 - `TWCManager Installation.pdf`: original installation guide
 
 ## Limitations And Safety Notes

@@ -239,9 +239,13 @@ server {
 6. Leave `$webEnableDebugTools = false` unless you explicitly need them.
 7. Leave `$webEnableTeslaHelper = false` unless you need the OAuth helper on this host.
 8. Put `tesla_oauth_config.json` outside the document root.
-9. Put `TeslaApiTokens.json` outside the document root, typically next to `TWCManager.py`.
-10. Start `TWCManager.py`.
-11. Browse to `/index.php`.
+9. Ensure the web server can write the Tesla token output path and the Tesla partner key files.
+10. If you want the default helper paths, the web server must be able to write:
+    - `/srv/TWCManager/TeslaApiTokens.json`
+    - `/srv/TWCManager/tesla_partner_private_key.pem`
+    - `/srv/TWCManager/public/.well-known/appspecific/com.tesla.3p.public-key.pem`
+11. Start `TWCManager.py`.
+12. Browse to `/index.php`.
 
 ## Public URLs
 
@@ -286,6 +290,15 @@ If the Tesla helper cannot save its config, check:
 - `TESLA_OAUTH_CONFIG_FILE` points to a writable path
 - the directory exists
 - the web server user can write there
+
+If the Tesla helper cannot prepare partner registration, check:
+
+- PHP has the `curl` extension enabled
+- the web server user can create the Tesla partner private key file
+- the web server user can create `public/.well-known/appspecific/com.tesla.3p.public-key.pem`
+- OpenSSL support is available in PHP
+- the helper host is reachable publicly by HTTPS
+- the Tesla app includes the helper host in `allowed_origins`
 
 If login sessions end sooner than expected, check:
 
