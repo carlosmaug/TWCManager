@@ -65,6 +65,9 @@ Important options:
   Path to the directory containing `TWCManager.py`
 - `$webRequireAuth`
   Enables the built-in authenticated session gate
+- `$webRequireAuthTeslaHelper`
+  Overrides auth only for `tesla_callback.php`. Set to `false` if Tesla must
+  reach the helper without the local PHP login page.
 - `$webUsername`
   Login username
 - `$webPasswordHash`

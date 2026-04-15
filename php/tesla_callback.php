@@ -18,6 +18,14 @@ function is_tesla_oauth_callback_request(): bool
 start_secure_session();
 send_security_headers();
 if (!is_tesla_oauth_callback_request()) {
+    $requireHelperAuth = isset($webRequireAuthTeslaHelper)
+        ? (bool) $webRequireAuthTeslaHelper
+        : (bool) ($webRequireAuth ?? true);
+    if (!$requireHelperAuth) {
+        $_SESSION['authenticated'] = true;
+        $_SESSION['session_started_at'] = time();
+        $_SESSION['last_activity_at'] = time();
+    }
     handle_login_submission('Tesla OAuth Helper');
     enforce_session_timeout('Tesla OAuth Helper');
 }

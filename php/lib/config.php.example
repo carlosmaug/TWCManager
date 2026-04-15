@@ -12,6 +12,9 @@ $twcScriptDir = "/srv/TWCManager/";
 // Generate hashes with:
 //   php -r 'echo password_hash("change-me", PASSWORD_DEFAULT), PHP_EOL;'
 $webRequireAuth = true;
+// Optional override for tesla_callback.php. Set to false if the helper must be
+// reachable by Tesla without showing the local PHP login page first.
+$webRequireAuthTeslaHelper = true;
 $webUsername = 'admin';
 $webPasswordHash = '';
 
