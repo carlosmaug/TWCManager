@@ -264,6 +264,8 @@ Common mistakes:
 - the helper saved `TeslaApiTokens.json`, but the Python process is using a different installation path
 - the web server could write the token file, but the Python process cannot read it
 - `redirect_uri` in Tesla does not exactly match the URL that handled the callback
+- a reverse proxy, Basic Auth layer, or SSO gateway challenged `tesla_callback.php` before Tesla could reach the real callback endpoint
+- the PHP session cookie was configured with `SameSite=Strict`, so the OAuth callback lost the saved session state
 - the token set was generated from an incomplete or wrong OAuth app configuration
 - the helper could not create or publish the Tesla partner key files
 - the Tesla app is missing the correct `allowed_origins` entry for the helper domain
@@ -278,6 +280,7 @@ Quick validation checklist:
   - `access_token`
   - `refresh_token`
   - `expires_at`
+  - `client_id`
 - `tesla_callback.php` shows partner registration as completed, or a clear pending/error reason
 - after restart, the log no longer prints `Failed to refresh Tesla API token`
 - the Tesla API status badge in the web UI is green instead of red

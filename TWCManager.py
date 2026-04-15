@@ -1055,13 +1055,19 @@ class TeslaCarApi:
             self.token_expire_time = now + timedelta(days=10).total_seconds()
             return False
 
+        if(self.client_id == ''):
+            print(time_now() + ': ERROR: Tesla API token refresh requires client_id, '
+                  'but the imported token set/environment does not include it. '
+                  'Regenerate/import TeslaApiTokens.json with client_id.')
+            self.last_error_time = now
+            self.token_expire_time = now + timedelta(days=10).total_seconds()
+            return False
+
         payload = {
             'grant_type': 'refresh_token',
             'refresh_token': self.refresh_token,
-            'audience': self.audience,
+            'client_id': self.client_id,
         }
-        if(self.client_id != ''):
-            payload['client_id'] = self.client_id
         try:
             resp = requests.post(
                 self.auth_url,
@@ -1085,7 +1091,9 @@ class TeslaCarApi:
             self.token_expire_time = now + float(apiResponseDict['expires_in'])
         except (KeyError, TypeError, ValueError):
             print(time_now() + ': ERROR: Failed to refresh Tesla API token. '
-                  'Import a new token set generated with MFA.')
+                  'status=' + str(getattr(resp, 'status_code', 'unknown'))
+                  + ', response=' + self.describe_response(apiResponseDict)
+                  + '. Import a new token set generated with MFA if the refresh token is no longer valid.')
             self.last_error_time = now
             self.token_expire_time = now + timedelta(days=10).total_seconds()
             return False

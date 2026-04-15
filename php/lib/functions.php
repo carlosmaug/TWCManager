@@ -35,17 +35,37 @@ function security_log($event, $details = array())
 
 function start_secure_session()
 {
+    global $webSessionCookieSameSite;
+
     if(session_status() === PHP_SESSION_ACTIVE) {
         return;
     }
 
     $https = !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off';
+    $sameSite = trim((string)($webSessionCookieSameSite ?? 'Lax'));
+    if($sameSite === '') {
+        $sameSite = 'Lax';
+    }
+    $sameSiteLower = strtolower($sameSite);
+    if($sameSiteLower === 'none' && !$https) {
+        $sameSite = 'Lax';
+    }
+    elseif($sameSiteLower === 'strict') {
+        $sameSite = 'Strict';
+    }
+    elseif($sameSiteLower === 'none') {
+        $sameSite = 'None';
+    }
+    else {
+        $sameSite = 'Lax';
+    }
+
     session_set_cookie_params([
         'lifetime' => 0,
         'path' => '/',
         'httponly' => true,
         'secure' => $https,
-        'samesite' => 'Strict',
+        'samesite' => $sameSite,
     ]);
     session_start();
 }

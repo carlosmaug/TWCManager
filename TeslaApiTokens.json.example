@@ -1,5 +1,8 @@
 {
     "access_token": "",
+    "client_id": "your_tesla_client_id",
     "refresh_token": "EU_",
-    "expires_at": 1774478085
+    "expires_at": 1774478085,
+    "audience": "https://fleet-api.prd.eu.vn.cloud.tesla.com",
+    "fleet_api_base_url": "https://fleet-api.prd.eu.vn.cloud.tesla.com/api/1"
 }

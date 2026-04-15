@@ -82,6 +82,8 @@ Important options:
   Idle timeout for authenticated sessions
 - `$webSessionAbsoluteTimeoutSeconds`
   Maximum total session lifetime
+- `$webSessionCookieSameSite`
+  Session cookie SameSite policy. Use `Lax` for Tesla OAuth callbacks.
 - `$webSecurityLogEnabled`
   Enables a separate security-event log
 - `$webSecurityLogFile`
@@ -149,7 +151,8 @@ If you use PHP-FPM with Apache, make sure the PHP handler applies to files in
 Recommended extra controls in Apache:
 
 - put the helper on a separate virtual host if possible
-- add Basic Auth or your preferred front-door auth
+- add Basic Auth or your preferred front-door auth, but exclude `/tesla_callback.php`
+  from any external auth challenge that Tesla cannot answer
 - add IP allowlists on both the main UI and helper vhost
 - use `mod_evasive` or an upstream reverse proxy for request rate limiting
 
@@ -269,6 +272,8 @@ https://twcmanager.local/tesla_callback.php
 - Prefer HTTPS.
 - Keep `$webTrustProxyHeaders = false` unless you really trust the proxy in
   front of the app.
+- Keep `$webSessionCookieSameSite = 'Lax'` for Tesla OAuth. `Strict` breaks the
+  callback because the browser returns from `auth.tesla.com`.
 - Keep `$webEnableDebugTools = false` on production systems.
 - Set a real `$webPasswordHash` before enabling authentication.
 - Use LAN or VPN IP allowlists at the reverse proxy.
@@ -311,3 +316,6 @@ If Tesla redirects back but the helper rejects the callback, check:
 - `$webBaseUrl` matches the real public origin
 - Tesla's registered `redirect_uri` exactly matches the helper URL
 - your browser session is preserved between login start and callback
+- your reverse proxy, Apache auth, SSO, or Basic Auth does not challenge
+  `/tesla_callback.php` before the request reaches PHP
+- `$webSessionCookieSameSite` is not `Strict`

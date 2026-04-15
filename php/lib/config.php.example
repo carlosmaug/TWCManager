@@ -18,6 +18,9 @@ $webPasswordHash = '';
 // Session security.
 $webSessionIdleTimeoutSeconds = 1800;
 $webSessionAbsoluteTimeoutSeconds = 43200;
+// Use Lax for OAuth flows so Tesla can return to tesla_callback.php with the
+// same browser session. Strict will break OAuth state validation.
+$webSessionCookieSameSite = 'Lax';
 
 // Feature gates.
 $webEnableDebugTools = false;
